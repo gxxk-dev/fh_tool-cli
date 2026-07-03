@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fh_tool-cli"
+version = "0.1.1"
+description = "用于本地管理 FiberHome fh_tool 接口的 Python CLI"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "AGPL-3.0-or-later"
+authors = [
+    { name = "Gxxk" },
+]
+keywords = ["FiberHome", "fh_tool", "ONU", "gateway", "telecomadmin"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Networking",
+]
+dependencies = [
+    "cryptography>=42.0.0",
+    "requests>=2.31.0",
+]
+
+[project.scripts]
+fh-tool = "fh_tool_cli.cli:main"
+fh_tool-cli = "fh_tool_cli.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
