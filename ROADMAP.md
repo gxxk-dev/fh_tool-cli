@@ -160,25 +160,32 @@ Harden 分层：
 
 ## 7. 标准 Web AJAX backend
 
-新增 superadmin Web 登录和 AJAX session 支持。第一阶段只做 read-only。
+新增 superadmin Web 登录、AJAX session、接口发现 catalog 和受安全门保护的任意 AJAX POST 支持。live discovery 是主路径，可以直接访问实机后台抓取同源 HTML/JS/CSS 并只读探测 read method；static discovery 作为 rootfs/备份目录扫描补充。
 
 ```bash
 fh-tool web login-check
 fh-tool web ajax get get_base_info
+fh-tool web discover live --ip 192.168.1.1 --web-port 8080 --output web-ajax-catalog.json
+fh-tool web discover static --root /mnt/dev-cold/HG5143F-ONU-vm/rootfs-vm --output static-web-ajax-catalog.json
+fh-tool web discover merge --input web-ajax-catalog.json --input static-web-ajax-catalog.json --output merged-web-ajax-catalog.json
+fh-tool web ajax post set_fake --param Enable=1
+fh-tool web ajax replay --catalog web-ajax-catalog.json --method set_fake --param Enable=1
 fh-tool web wan list
 fh-tool web tr069 show
 fh-tool web services show
 fh-tool web firewall show
 ```
 
-后续 typed command：
+已覆盖 typed command：
 
 - WAN/宽带信息。
 - TR-069 页面状态。
 - service switches。
-- firewall/UPnP/IGMP。
+- firewall。
 - port mapping。
 - vlanbind。
+
+任意 `web ajax post/replay` 默认 dry-run；真实执行必须同时提供 `--execute --backup-confirmed --yes --danger`，默认拒绝空 payload，输出默认脱敏。
 
 写接口必须走风险分级和备份，不做批量无确认写入。
 

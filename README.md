@@ -120,18 +120,30 @@ fh-tool wan list --backend local-vm
 
 `local-vm` 只是在本机 proot VM 内执行厂商 `cfg_cmd`。`--vm-root` 必须指向 VM 工作区目录，也就是包含 `bin/proot-shell` 和 `rootfs-vm/fhrom/bin/cfg_cmd` 的目录；默认是 `/mnt/dev-cold/HG5143F-ONU-vm`。不要把它指到里面的 `rootfs-vm/`。
 
-Web AJAX 读取命令只读。需要复用已有 Web session 时加 `--sessionid`；需要显式登录时使用 `--username` 配合 `--password-stdin` 或 `--password`。sessionid、密码、LOID、PPPoE 等敏感字段默认会脱敏；只有显式加 `--reveal-secrets` 才输出明文。
+Web AJAX 读取命令只读。需要复用已有 Web session 时加 `--sessionid`；需要登录时可显式传 `--password-stdin` 或 `--password`。未显式提供密码时默认 `--username useradmin --password-source auto`，会依次尝试 `GetAdminAccount` 和 cfg 路径读取 Web superadmin 密码；失败不会阻塞只读抓取。sessionid、密码、LOID、PPPoE 等敏感字段默认会脱敏；只有显式加 `--reveal-secrets` 才输出明文。
+
+后台 AJAX 接口发现以 live discovery 为主路径，不需要 HAR，也不需要 rootfs：
+
+```bash
+fh-tool web discover live --ip 192.168.1.1 --web-port 8080 --output web-ajax-catalog.json
+fh-tool web discover static --root /mnt/dev-cold/HG5143F-ONU-vm/rootfs-vm --output static-web-ajax-catalog.json
+fh-tool web discover merge --input web-ajax-catalog.json --input static-web-ajax-catalog.json --output merged-web-ajax-catalog.json
+```
+
+`live` 只探测只读 `get_*/query_*/show_*` 候选；写候选只进入 catalog，不会自动 POST。`static` 是补充路径，用于从 rootfs/备份目录扫描 HTML/JS/CSS 里的 `ajaxmethod`、参数名和上下文。
 
 Web AJAX 写接口默认只做 dry-run。执行 POST 需要先完成备份，并显式加 `--execute --backup-confirmed --yes --danger`：
 
 ```bash
+fh-tool web ajax post set_wan_info --param VLANID=100
+fh-tool web ajax replay --catalog web-ajax-catalog.json --method set_wan_info --param VLANID=100
 fh-tool web port-mapping set --operation add --wan-index 1 --wan-session-index 1 --wan-iporppp ppp --external-port 8080 --protocol tcp --internal-client 192.168.1.2 --internal-port 80
 fh-tool web vlanbind set --operation add --if-name eth1 --user-vlan 100 --wan-vlan 100
 fh-tool web firewall set --enable 1 --level medium --dos-enable 1 --ipv6-enable 1 --execute --backup-confirmed --yes --danger
 fh-tool web services set --service telnet --enabled 0 --execute --backup-confirmed --yes --danger
 ```
 
-常规 Web 写接口优先使用 typed 参数。`--json-payload` 和可重复的 `--param k=v` 仍保留为固件差异逃生口，合并顺序是 typed 参数、JSON、最后 `--param` 覆盖。
+常规 Web 写接口优先使用 typed 参数。`web ajax post` 和 `web ajax replay` 支持任意已知或未知 AJAX method，默认只输出计划，不发 POST；执行同样必须加 `--execute --backup-confirmed --yes --danger`，且默认拒绝空 payload。`--json-payload` 和可重复的 `--param k=v` 仍保留为固件差异逃生口，合并顺序是 typed 参数、JSON、最后 `--param` 覆盖。
 
 Telnet/cfg/诊断命令默认不会自动套用派生凭据。如果设备仍是 HG5143F 默认 Telnet 规则，并且已提供或保存 MAC，可以显式加 `--use-derived-credentials` 作为 fallback：
 
