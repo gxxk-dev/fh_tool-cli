@@ -5,6 +5,7 @@ import unittest
 from fh_tool_cli.config_decrypt import decrypt_config_document, parse_uci_like
 from fh_tool_cli.crypto import decrypt_config_encrymode2
 from fh_tool_cli.errors import CliError
+from fh_tool_cli.cli import parse_args
 
 
 class ConfigDecryptTests(unittest.TestCase):
@@ -81,6 +82,12 @@ class ConfigDecryptTests(unittest.TestCase):
         options = document["sections"][0]["options"]
         self.assertEqual(options["URL"]["value"], "[REDACTED]")
         self.assertEqual(options["Username"]["value"], "[REDACTED]")
+
+    def test_redact_flag_is_deprecated(self) -> None:
+        args = parse_args(["config-decrypt", "--input", "missing.conf", "--redact"])
+
+        with self.assertRaisesRegex(CliError, "已弃用"):
+            args.handler(args)
 
 
 if __name__ == "__main__":

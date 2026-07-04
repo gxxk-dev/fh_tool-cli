@@ -16,7 +16,7 @@ from ..backends.telnet import TelnetCredentials, TelnetShell
 from ..backends.web_ajax import DEFAULT_AJAX_PATH, DEFAULT_WEB_LOGIN_PORT, WebAjaxClient
 from ..config_store import DEFAULT_CONFIG_PATH, normalize_ip, resolve_ip, resolve_mac
 from ..errors import CliError, FHToolError
-from ..risk import require_danger
+from ..risk import dry_run_notice, is_confirmed
 from ..web_discovery import (
     DEFAULT_MAX_DEPTH,
     DEFAULT_MAX_FILE_SIZE,
@@ -256,13 +256,11 @@ def command_web_ajax_get(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_web_ajax_post(args: argparse.Namespace) -> dict[str, Any]:
-    dry_run = not args.execute
+    dry_run = not is_confirmed(args)
     payload = _web_ajax_payload_from_args(args)
     _require_raw_post_payload(args, payload)
     if not dry_run:
         _require_lan_target(args)
-        require_danger(args, f"web ajax post {args.method} 会执行任意 Web AJAX POST")
-        _require_backup_confirmed(args, f"web ajax post {args.method}")
     client = _web_client_from_args(args)
     login_result = None
     if not dry_run:
@@ -272,14 +270,15 @@ def command_web_ajax_post(args: argparse.Namespace) -> dict[str, Any]:
         result["login"] = _auth_summary(login_result)
     if dry_run:
         result["plan"] = {
-            "execute_requires": ["--execute", "--backup-confirmed", "--yes", "--danger"],
+            "execute_requires": ["--confirm"],
             "allow_empty_payload": bool(args.allow_empty_payload),
         }
+        result.update(dry_run_notice())
     return result
 
 
 def command_web_ajax_replay(args: argparse.Namespace) -> dict[str, Any]:
-    dry_run = not args.execute
+    dry_run = not is_confirmed(args)
     payload = _web_ajax_payload_from_args(args)
     catalog = read_catalog(Path(args.catalog).expanduser())
     try:
@@ -289,8 +288,6 @@ def command_web_ajax_replay(args: argparse.Namespace) -> dict[str, Any]:
     _require_raw_post_payload(args, payload)
     if not dry_run:
         _require_lan_target(args)
-        require_danger(args, f"web ajax replay {args.method} 会执行任意 Web AJAX POST")
-        _require_backup_confirmed(args, f"web ajax replay {args.method}")
     client = _web_client_from_args(args)
     login_result = None
     if not dry_run:
@@ -307,9 +304,10 @@ def command_web_ajax_replay(args: argparse.Namespace) -> dict[str, Any]:
         result["login"] = _auth_summary(login_result)
     if dry_run:
         result["plan"] = {
-            "execute_requires": ["--execute", "--backup-confirmed", "--yes", "--danger"],
+            "execute_requires": ["--confirm"],
             "allow_empty_payload": bool(args.allow_empty_payload),
         }
+        result.update(dry_run_notice())
         return result
     result["verify"] = _run_replay_verify(client, entry)
     return result
@@ -497,10 +495,9 @@ def command_web_diagnostics_show(args: argparse.Namespace) -> dict[str, Any]:
 
 def command_web_typed_write(group: str, action: str) -> Callable[[argparse.Namespace], dict[str, Any]]:
     def handler(args: argparse.Namespace) -> dict[str, Any]:
-        dry_run = not args.execute
+        dry_run = not is_confirmed(args)
         if not dry_run:
-            require_danger(args, f"web {group} {action} 会修改 Web AJAX 配置")
-            _require_backup_confirmed(args, f"web {group} {action}")
+            _require_lan_target(args)
         payload = build_web_write_payload(group, action, args)
         if args.json_payload:
             payload.update(parse_json_object(args.json_payload))
@@ -509,14 +506,13 @@ def command_web_typed_write(group: str, action: str) -> Callable[[argparse.Names
             raise CliError("Web AJAX write 需要 typed 参数、--param 或 --json-payload")
         client = _web_client_from_args(args)
         _web_login_if_requested(client, args)
-        return client.typed_write(group, action, payload, dry_run=dry_run)
+        result = client.typed_write(group, action, payload, dry_run=dry_run)
+        if dry_run:
+            result["plan"] = {"execute_requires": ["--confirm"]}
+            result.update(dry_run_notice())
+        return result
 
     return handler
-
-
-def _require_backup_confirmed(args: argparse.Namespace, message: str) -> None:
-    if not getattr(args, "backup_confirmed", False):
-        raise CliError(f"{message} 需要先完成备份，并传 --backup-confirmed")
 
 
 def add_web_options(parser: argparse.ArgumentParser) -> None:
@@ -569,17 +565,7 @@ def add_web_write_options(parser: argparse.ArgumentParser) -> None:
     add_web_options(parser)
     parser.add_argument("--param", action="append", default=[], help="POST 参数 k=v，可重复")
     parser.add_argument("--json-payload", help="POST JSON object，会与 --param 合并")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--dry-run",
-        dest="execute",
-        action="store_false",
-        help="只显示 POST 计划；默认行为",
-    )
-    mode.add_argument("--execute", action="store_true", help="执行 Web AJAX POST")
-    add_danger(parser)
-    parser.add_argument("--backup-confirmed", action="store_true", help="确认已完成备份")
-    parser.set_defaults(execute=False)
+    add_web_write_confirmation(parser)
 
 
 def add_web_raw_post_options(parser: argparse.ArgumentParser) -> None:
@@ -588,17 +574,7 @@ def add_web_raw_post_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--param", action="append", default=[], help="POST 参数 k=v，可重复")
     parser.add_argument("--json-payload", help="POST JSON object，会与 --param 合并")
     parser.add_argument("--allow-empty-payload", action="store_true", help="允许空 payload POST")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--dry-run",
-        dest="execute",
-        action="store_false",
-        help="只显示 POST 计划；默认行为",
-    )
-    mode.add_argument("--execute", action="store_true", help="执行 Web AJAX POST")
-    add_danger(parser)
-    parser.add_argument("--backup-confirmed", action="store_true", help="确认已完成备份")
-    parser.set_defaults(execute=False)
+    add_web_write_confirmation(parser)
 
 
 def add_web_replay_options(parser: argparse.ArgumentParser) -> None:
@@ -608,17 +584,7 @@ def add_web_replay_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--param", action="append", default=[], help="POST 参数 k=v，可重复")
     parser.add_argument("--json-payload", help="POST JSON object，会与 --param 合并")
     parser.add_argument("--allow-empty-payload", action="store_true", help="允许空 payload POST")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--dry-run",
-        dest="execute",
-        action="store_false",
-        help="只显示 POST 计划；默认行为",
-    )
-    mode.add_argument("--execute", action="store_true", help="执行 Web AJAX POST")
-    add_danger(parser)
-    parser.add_argument("--backup-confirmed", action="store_true", help="确认已完成备份")
-    parser.set_defaults(execute=False)
+    add_web_write_confirmation(parser)
 
 
 def add_web_discover_options(parser: argparse.ArgumentParser) -> None:
@@ -633,9 +599,17 @@ def add_web_crawl_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--save-samples", action="store_true", help="保存脱敏响应 sample；默认只保存 shape")
 
 
-def add_danger(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--yes", action="store_true", help="确认执行写入动作")
-    parser.add_argument("--danger", action="store_true", help="确认该动作属于高风险")
+def add_web_write_confirmation(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="确认执行 Web 写入；不加时只输出 dry-run 计划",
+    )
+    parser.add_argument("--yes", dest="deprecated_yes", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--danger", dest="deprecated_danger", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--backup-confirmed", dest="deprecated_backup_confirmed", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--execute", dest="deprecated_execute", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--dry-run", dest="deprecated_dry_run", action="store_true", help=argparse.SUPPRESS)
 
 
 def add_web_port_mapping_write_options(parser: argparse.ArgumentParser) -> None:

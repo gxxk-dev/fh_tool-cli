@@ -341,7 +341,7 @@ def restore_backup_archive(
     allowlist: list[str] | None = None,
 ) -> dict[str, Any]:
     if not dry_run and target_root is None:
-        raise CliError("restore --execute 需要显式指定 --target-root")
+        raise CliError("restore --confirm 需要显式指定 --target-root")
 
     allowed = set(allowlist or RESTORE_ALLOWLIST)
     requested = {_normalize_device_path(path) for path in paths or []}

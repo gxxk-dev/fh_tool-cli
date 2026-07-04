@@ -122,7 +122,7 @@ def upload_workflow_plan(
     if action == "preconfig":
         manual_actions = [
             "Run fh-tool get-preconfig to confirm the uploaded preconfig is visible.",
-            "Only after manual review, run fh-tool set-preconfig --fullname ... --yes --danger.",
+            "Only after manual review, run fh-tool set-preconfig --fullname ... --confirm.",
             "Do not reboot automatically; decide separately after configuration review.",
         ]
         verification = [

@@ -23,7 +23,7 @@
 
 ```bash
 fh-tool config-decrypt --input usrconfig_conf --attr attrconfig_conf --output decrypted.json
-fh-tool config-decrypt --input usrconfig_conf --redact
+fh-tool config-decrypt --input usrconfig_conf
 fh-tool config-decrypt --input usrconfig_conf --reveal-secrets
 ```
 
@@ -42,7 +42,8 @@ fh-tool config-decrypt --input usrconfig_conf --reveal-secrets
 
 ```bash
 fh-tool cfg get PATH
-fh-tool cfg set PATH VALUE --yes
+fh-tool cfg set PATH VALUE
+fh-tool cfg set PATH VALUE --confirm
 fh-tool cfg attr PATH
 fh-tool cfg snapshot --output cfg.json
 fh-tool cfg diff before.json after.json
@@ -50,7 +51,7 @@ fh-tool cfg diff before.json after.json
 
 要求：
 
-- `cfg set` 前自动提示备份。
+- `cfg set` 不加 `--confirm` 只输出 dry-run 计划和提示。
 - 写入后读取同一 PATH 验证结果。
 - 输出同时包含 path、value、risk、是否已验证落盘。
 - 对 TR-069、WAN、PON、LOID、VLAN、preconfig 等路径默认标记 `danger`。
@@ -91,10 +92,10 @@ fh-tool backup verify backup.tgz
 
 ```bash
 fh-tool account show
-fh-tool account set-web-admin-password --password-stdin --yes
-fh-tool account set-telnet-password --generate --yes
-fh-tool account set-telnet-username --name telnetadmin --yes --danger
-fh-tool account set-su-runtime-password --password-stdin --yes --danger
+fh-tool account set-web-admin-password --password-stdin
+fh-tool account set-telnet-password --generate --confirm
+fh-tool account set-telnet-username --name telnetadmin
+fh-tool account set-su-runtime-password --password-stdin --confirm
 ```
 
 支持的 clean persistent path：
@@ -127,11 +128,11 @@ fh-tool autoupdate status
 fh-tool autoupdate audit --output report.md
 fh-tool autoupdate plan
 fh-tool tr069 status
-fh-tool tr069 harden --periodic-inform off --yes --danger
-fh-tool tr069 randomize-connection-request --yes --danger
+fh-tool tr069 harden --periodic-inform off
+fh-tool tr069 randomize-connection-request --confirm
 fh-tool cloud status
 fh-tool cloud endpoints
-fh-tool cloud disable-cloudclt --yes --danger
+fh-tool cloud disable-cloudclt --confirm
 ```
 
 TR-069 覆盖：
@@ -185,7 +186,7 @@ fh-tool web firewall show
 - port mapping。
 - vlanbind。
 
-任意 `web ajax post/replay` 默认 dry-run；真实执行必须同时提供 `--execute --backup-confirmed --yes --danger`，默认拒绝空 payload，输出默认脱敏。
+任意 `web ajax post/replay` 默认 dry-run；真实执行必须提供 `--confirm`，默认拒绝空 payload，输出默认脱敏。
 
 写接口必须走风险分级和备份，不做批量无确认写入。
 
@@ -215,19 +216,18 @@ fh-tool ports
 
 ## 9. 安全护栏
 
-所有命令统一风险分级。
+写入命令统一确认模型。
 
 - `safe`：只读、无敏感明文。
 - `sensitive`：只读但可能显示 secret，需要 `--reveal-secrets`。
-- `write`：普通配置写入，需要 `--yes`。
-- `danger`：可能影响远程管理、登录、业务、进程，需要 `--yes --danger`。
-- `extreme`：reboot、restore、factory reset、firmware/preconfig upload，需要 `--yes --danger --i-know-this-can-break-my-device`。
+- `write`：会改变设备状态的命令默认 dry-run，需要 `--confirm` 才执行。
+- 旧确认参数已弃用：`--yes`、`--danger`、`--backup-confirmed`、`--execute`、`--dry-run`、`--allow-risky`、`--i-know-this-can-break-my-device`。
 
 通用规则：
 
 - 默认只允许 RFC1918/LAN 目标。
 - 默认脱敏。
-- 写操作前提示 backup。
+- 写操作未确认时提示 `--confirm`。
 - 写操作后做 read-back verify。
 - 不自动关闭 Telnet。
 - 不默认修改 LOID、PON mode、WAN VLAN、ServiceList、TR-069 VLAN。

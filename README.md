@@ -89,7 +89,8 @@ fh-tool credentials derive --kind hg5143f-telnet --mac AABBCCDDEEFF
 打开 runtime Telnet：
 
 ```bash
-fh-tool telnet enable --yes
+fh-tool telnet enable
+fh-tool telnet enable --confirm
 ```
 
 检查端口：
@@ -132,18 +133,18 @@ fh-tool web discover merge --input web-ajax-catalog.json --input static-web-ajax
 
 `live` 只探测只读 `get_*/query_*/show_*` 候选；写候选只进入 catalog，不会自动 POST。`static` 是补充路径，用于从 rootfs/备份目录扫描 HTML/JS/CSS 里的 `ajaxmethod`、参数名和上下文。
 
-Web AJAX 写接口默认只做 dry-run。执行 POST 需要先完成备份，并显式加 `--execute --backup-confirmed --yes --danger`：
+Web AJAX 写接口默认只做 dry-run，并会提示重新运行时加 `--confirm` 才会执行 POST：
 
 ```bash
 fh-tool web ajax post set_wan_info --param VLANID=100
 fh-tool web ajax replay --catalog web-ajax-catalog.json --method set_wan_info --param VLANID=100
 fh-tool web port-mapping set --operation add --wan-index 1 --wan-session-index 1 --wan-iporppp ppp --external-port 8080 --protocol tcp --internal-client 192.168.1.2 --internal-port 80
 fh-tool web vlanbind set --operation add --if-name eth1 --user-vlan 100 --wan-vlan 100
-fh-tool web firewall set --enable 1 --level medium --dos-enable 1 --ipv6-enable 1 --execute --backup-confirmed --yes --danger
-fh-tool web services set --service telnet --enabled 0 --execute --backup-confirmed --yes --danger
+fh-tool web firewall set --enable 1 --level medium --dos-enable 1 --ipv6-enable 1 --confirm
+fh-tool web services set --service telnet --enabled 0 --confirm
 ```
 
-常规 Web 写接口优先使用 typed 参数。`web ajax post` 和 `web ajax replay` 支持任意已知或未知 AJAX method，默认只输出计划，不发 POST；执行同样必须加 `--execute --backup-confirmed --yes --danger`，且默认拒绝空 payload。`--json-payload` 和可重复的 `--param k=v` 仍保留为固件差异逃生口，合并顺序是 typed 参数、JSON、最后 `--param` 覆盖。
+常规 Web 写接口优先使用 typed 参数。`web ajax post` 和 `web ajax replay` 支持任意已知或未知 AJAX method，默认只输出计划，不发 POST；执行必须加 `--confirm`，且默认拒绝空 payload。`--json-payload` 和可重复的 `--param k=v` 仍保留为固件差异逃生口，合并顺序是 typed 参数、JSON、最后 `--param` 覆盖。旧的确认参数会直接报弃用错误。
 
 Telnet/cfg/诊断命令默认不会自动套用派生凭据。如果设备仍是 HG5143F 默认 Telnet 规则，并且已提供或保存 MAC，可以显式加 `--use-derived-credentials` 作为 fallback：
 
@@ -173,17 +174,16 @@ fh-tool backup verify backup.tgz
 `restore` 默认只做 dry-run：解析 backup、验证 manifest/sha256，并显示将恢复的文件、目标路径和风险等级，不写入任何文件。
 
 ```bash
-fh-tool restore backup.tgz --dry-run
-fh-tool restore backup.tgz --dry-run --path /fhconf/usrconfig_conf
+fh-tool restore backup.tgz
+fh-tool restore backup.tgz --path /fhconf/usrconfig_conf
 ```
 
-执行恢复必须显式指定本地目标根目录，并通过 extreme 风险确认：
+执行恢复必须显式指定本地目标根目录，并加 `--confirm`：
 
 ```bash
 fh-tool restore backup.tgz \
   --target-root /tmp/fh-tool-restore-root \
-  --execute \
-  --yes --danger --i-know-this-can-break-my-device
+  --confirm
 ```
 
 也可以选择真实设备目标。该模式会通过 Telnet 把 allowlist 文件先写入 `/tmp/fh-tool-restore` staging，远端 sha256 校验通过后才覆盖目标路径；仍然不会自动 reboot 或 factory reset：
@@ -192,8 +192,7 @@ fh-tool restore backup.tgz \
 fh-tool restore backup.tgz \
   --target device \
   --path /fhconf/usrconfig_conf \
-  --execute \
-  --yes --danger --i-know-this-can-break-my-device
+  --confirm
 ```
 
 当前 restore 只恢复 allowlist 内的配置文件，且会拒绝路径穿越、绝对路径逃逸和未知文件写入。`/proc/mtd`、runtime password 文件、restore/factory reset flag 等备份内容不会被恢复。恢复后会 read-back/hash verify；不会自动 reboot，也不会自动 factory reset。
@@ -208,12 +207,10 @@ fh-tool cloud audit --output cloud-report.md
 fh-tool cloud plan
 ```
 
-`cloud status/audit/plan` 会结构化显示 SmartSwitch 当前值、配置路径、禁用值、影响面和禁止改动项。禁用 SmartSwitch 只会写入 `InternetGatewayDevice.X_CT-COM_SmartSwitch.Enable=0`，需要先完成备份，并在写入后 read-back verify：
+`cloud status/audit/plan` 会结构化显示 SmartSwitch 当前值、配置路径、禁用值、影响面和禁止改动项。禁用 SmartSwitch 只会写入 `InternetGatewayDevice.X_CT-COM_SmartSwitch.Enable=0`，不加 `--confirm` 只输出 dry-run 计划；确认写入后会 read-back verify：
 
 ```bash
-fh-tool cloud disable-smartswitch \
-  --backup-confirmed \
-  --yes --danger
+fh-tool cloud disable-smartswitch --confirm
 ```
 
 该命令不会修改 LOID、PON、WAN VLAN、ServiceList 或 TR-069 VLAN。
@@ -225,33 +222,33 @@ fh-tool cloud disable-smartswitch \
 | func | command |
 |---|---|
 | `GetResult` | `fh-tool get-result` |
-| `SetResult` | `fh-tool set-result --result VALUE --yes` |
+| `SetResult` | `fh-tool set-result --result VALUE [--confirm]` |
 | `GetPortMirror` | `fh-tool get-port-mirror` |
-| `SetPortMirror` | `fh-tool set-port-mirror --enable ... --direction ... --srcport ... --dstport ... --yes` |
+| `SetPortMirror` | `fh-tool set-port-mirror --enable ... --direction ... --srcport ... --dstport ... [--confirm]` |
 | `LogDownload` | `fh-tool log-download [--output log.tar.gz]` |
 | `GetDevInfo` | `fh-tool dev-info` |
 | `GetAdminAccount` | `fh-tool admin-account` |
 | `GetRegAccount` | `fh-tool reg-account` |
-| `SetRegAccount` | `fh-tool set-reg-account --regname ... --regpwd ... --yes` |
+| `SetRegAccount` | `fh-tool set-reg-account --regname ... --regpwd ... [--confirm]` |
 | `GetPwdRegPassword` | `fh-tool pwd-reg-password` |
-| `SetPwdRegPassword` | `fh-tool set-pwd-reg-password --password ... --yes` |
-| `DownloadFile` | `fh-tool download-file --file-name /var/... --output out.tar.gz --yes` |
-| `RestoreDefaultSettings` | `fh-tool restore-default-settings --yes --danger --i-know-this-can-break-my-device` |
+| `SetPwdRegPassword` | `fh-tool set-pwd-reg-password --password ... [--confirm]` |
+| `DownloadFile` | `fh-tool download-file --file-name /var/... --output out.tar.gz [--confirm]` |
+| `RestoreDefaultSettings` | `fh-tool restore-default-settings [--confirm]` |
 | `UploadPrepare` | `fh-tool upload-prepare` |
-| `DeviceReboot` | `fh-tool reboot --yes --danger --i-know-this-can-break-my-device` |
+| `DeviceReboot` | `fh-tool reboot [--confirm]` |
 | `GetPreconfig` | `fh-tool get-preconfig` |
-| `SetPreconfig` | `fh-tool set-preconfig --fullname ... --yes --danger` |
-| `TelnetEnable` | `fh-tool telnet enable --yes` / `fh-tool telnet disable --yes --danger` |
+| `SetPreconfig` | `fh-tool set-preconfig --fullname ... [--confirm]` |
+| `TelnetEnable` | `fh-tool telnet enable [--confirm]` / `fh-tool telnet disable [--confirm]` |
 | `GetPppoeAccount` | `fh-tool pppoe-account` |
-| `SetFHDebugLog` | `fh-tool set-fh-debug-log --module tr069 --data ... --yes --danger` |
-| `CloseFHDebugLog` | `fh-tool close-fh-debug-log --yes` |
-| `OpenFHDebugLog` | `fh-tool open-fh-debug-log --yes` |
+| `SetFHDebugLog` | `fh-tool set-fh-debug-log --module tr069 --data ... [--confirm]` |
+| `CloseFHDebugLog` | `fh-tool close-fh-debug-log [--confirm]` |
+| `OpenFHDebugLog` | `fh-tool open-fh-debug-log [--confirm]` |
 
 原始调用入口：
 
 ```bash
 fh-tool call --func GetDevInfo
-fh-tool call --func TelnetEnable --param telnet=1 --allow-risky
+fh-tool call --func TelnetEnable --param telnet=1 --confirm
 ```
 
 ## upload / download endpoint
@@ -270,10 +267,10 @@ fh-tool upload-prepare
 fh-tool upload-prepare --reveal-secrets
 ```
 
-上传 firmware/preconfig 前先 dry-run：
+上传 firmware/preconfig 默认先 dry-run：
 
 ```bash
-fh-tool upload --action preconfig --file sysinfo_conf --sessionid TOKEN --dry-run
+fh-tool upload --action preconfig --file sysinfo_conf --sessionid TOKEN
 ```
 
 真正上传属于 extreme 风险，只上传文件到 staging path，不会自动 reboot、restore 或切换 preconfig：
@@ -283,21 +280,22 @@ fh-tool upload \
   --action preconfig \
   --file sysinfo_conf \
   --sessionid TOKEN \
-  --yes --danger --i-know-this-can-break-my-device
+  --confirm
 ```
 
 ## 风险边界
 
-这些命令默认不会执行，必须显式确认：
+写入型命令默认不会执行，只输出 dry-run 计划和提示。确认执行只使用一个参数：
 
-- `--yes`: 会写设备状态或创建下载文件。
-- `--danger`: 高风险写入、关闭 Telnet、执行 debug script。
-- `--i-know-this-can-break-my-device`: restore、firmware/preconfig upload、恢复出厂或重启。
+- `--confirm`: 执行写入、上传、恢复、重启等会改变设备状态的动作。
+- `--reveal-secrets`: 只控制敏感字段是否明文输出，不代表写入确认。
+
+旧确认参数 `--yes`、`--danger`、`--backup-confirmed`、`--execute`、`--dry-run`、`--allow-risky` 和 `--i-know-this-can-break-my-device` 已弃用，传入会直接报错。
 
 当前设备如果需要保持 Telnet 打开，不要运行：
 
 ```bash
-fh-tool telnet disable --yes --danger
+fh-tool telnet disable --confirm
 ```
 
 ## License

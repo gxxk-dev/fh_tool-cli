@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -75,18 +76,8 @@ from .diagnostics import (
     wan_list,
 )
 from .errors import CliError, FHToolError
-from .parser import (
-    DEFAULT_PORTS,
-    add_cfg_backend_options,
-    add_common_options,
-    add_danger,
-    add_extreme,
-    add_password_input_options,
-    add_telnet_options,
-    add_yes,
-    add_api_command as _add_parser_api_command,
-    parse_args as _parse_cli_args,
-)
+from .parser import add_api_command as _add_parser_api_command
+from .parser import parse_args as _parse_cli_args
 from .remote import (
     autoupdate_status,
     cloud_disable_cloudclt,
@@ -99,7 +90,7 @@ from .remote import (
     tr069_status,
     write_audit_report,
 )
-from .risk import require_danger, require_extreme, require_yes
+from .risk import dry_run_notice, is_confirmed
 from .upload import (
     redact_upload_prepare_result,
     upload_file,
@@ -117,6 +108,80 @@ def emit(data: Any, json_mode: bool) -> None:
         print(json.dumps(data, ensure_ascii=False, indent=2))
     else:
         print(data)
+
+
+SENSITIVE_PLAN_KEY_RE = re.compile(
+    r"(sessionid|token|password|passwd|pwd|loginpd|loid|pppoe|acs|secret|psk|wepkey|wpakey|regpwd)",
+    re.IGNORECASE,
+)
+
+
+def _redact_plan_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: (
+                "[REDACTED]"
+                if SENSITIVE_PLAN_KEY_RE.search(str(key))
+                else _redact_plan_value(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_plan_value(item) for item in value]
+    return value
+
+
+def _write_dry_run_plan(
+    command: str,
+    message: str,
+    *,
+    request: dict[str, Any] | None = None,
+    target: dict[str, Any] | None = None,
+    side_effects: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "mode": "write-plan",
+        "command": command,
+        "message": message,
+        **dry_run_notice(),
+    }
+    if request is not None:
+        result["request"] = _redact_plan_value(request)
+    if target is not None:
+        result["target"] = _redact_plan_value(target)
+    if side_effects is not None:
+        result["side_effects"] = side_effects
+    return result
+
+
+def _attach_dry_run_notice(result: dict[str, Any]) -> dict[str, Any]:
+    result.update(dry_run_notice())
+    return result
+
+
+def _api_write_dry_run_plan(
+    func: str,
+    params: dict[str, Any] | None,
+    message: str,
+    *,
+    side_effects: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return _write_dry_run_plan(
+        func,
+        message,
+        request=api_payload(func, params),
+        side_effects=side_effects or {"api_call": False},
+    )
+
+
+def _password_input_mode(args: argparse.Namespace) -> str:
+    if getattr(args, "generate", False):
+        return "generate"
+    if getattr(args, "password_stdin", False):
+        return "stdin"
+    if getattr(args, "password", None) is not None:
+        return "argument"
+    return "required_on_confirm"
 
 
 def command_probe(args: argparse.Namespace) -> dict[str, Any]:
@@ -212,6 +277,8 @@ def command_config_clear(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_config_decrypt(args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "deprecated_redact", False):
+        raise CliError("--redact 已弃用。敏感值默认脱敏；需要明文时只加 --reveal-secrets")
     return decrypt_config_file(
         Path(args.input).expanduser(),
         attr_path=Path(args.attr).expanduser() if args.attr else None,
@@ -235,11 +302,9 @@ def command_backup_verify(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_restore_backup(args: argparse.Namespace) -> dict[str, Any]:
-    dry_run = not args.execute
-    if not dry_run:
-        require_extreme(args, "restore 会覆盖设备配置文件")
+    dry_run = not is_confirmed(args)
     if args.target == "device":
-        return restore_backup_to_device(
+        result = restore_backup_to_device(
             Path(args.backup).expanduser(),
             shell_runner=_telnet_shell_from_args(args).run,
             dry_run=dry_run,
@@ -247,12 +312,14 @@ def command_restore_backup(args: argparse.Namespace) -> dict[str, Any]:
             remote_tmpdir=args.remote_tmpdir,
             chunk_size=args.chunk_size,
         )
-    return restore_backup_archive(
+        return _attach_dry_run_notice(result) if dry_run else result
+    result = restore_backup_archive(
         Path(args.backup).expanduser(),
         target_root=Path(args.target_root).expanduser() if args.target_root else None,
         dry_run=dry_run,
         paths=args.path,
     )
+    return _attach_dry_run_notice(result) if dry_run else result
 
 
 def command_credentials_derive(args: argparse.Namespace) -> dict[str, Any]:
@@ -362,12 +429,23 @@ def command_cfg_attr(args: argparse.Namespace) -> dict[str, Any]:
 
 def command_cfg_set(args: argparse.Namespace) -> dict[str, Any]:
     risk = cfg_path_risk(args.path)
-    if risk == "danger":
-        require_danger(args, "cfg set 会修改高风险配置路径")
-    else:
-        require_yes(args, "cfg set 会修改设备配置")
-    if not args.backup_confirmed:
-        raise CliError("cfg set 前需要先完成备份；确认已有备份请加 --backup-confirmed")
+    if not is_confirmed(args):
+        rendered_value, redacted = redact_cfg_value(
+            args.path,
+            args.value,
+            reveal_secrets=False,
+        )
+        return _write_dry_run_plan(
+            "cfg set",
+            "cfg set 会修改设备配置",
+            target={
+                "path": args.path,
+                "value": rendered_value,
+                "redacted": redacted,
+                "confirmation_class": risk,
+            },
+            side_effects={"cfg_set": False},
+        )
     backend = _cfg_backend_from_args(args)
     return cfg_set_with_verify(backend, args.path, args.value)
 
@@ -396,11 +474,6 @@ def command_cfg_diff(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
-def _require_backup_confirmed(args: argparse.Namespace, message: str) -> None:
-    if not args.backup_confirmed:
-        raise CliError(f"{message} 前需要先完成备份；确认已有备份请加 --backup-confirmed")
-
-
 def command_account_show(args: argparse.Namespace) -> dict[str, Any]:
     return account_show(
         _cfg_backend_from_args(args),
@@ -409,8 +482,13 @@ def command_account_show(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_account_set_web_admin_password(args: argparse.Namespace) -> dict[str, Any]:
-    require_yes(args, "set-web-admin-password 会修改 Web superadmin password")
-    _require_backup_confirmed(args, "set-web-admin-password")
+    if not is_confirmed(args):
+        return _write_dry_run_plan(
+            "account set-web-admin-password",
+            "set-web-admin-password 会修改 Web superadmin password",
+            target={"password_input": _password_input_mode(args)},
+            side_effects={"cfg_set": False},
+        )
     secret = read_secret_from_args(args)
     result = set_web_admin_password(_cfg_backend_from_args(args), secret.password)
     result["generated"] = secret.generated
@@ -418,8 +496,13 @@ def command_account_set_web_admin_password(args: argparse.Namespace) -> dict[str
 
 
 def command_account_set_telnet_password(args: argparse.Namespace) -> dict[str, Any]:
-    require_yes(args, "set-telnet-password 会修改 Telnet login password")
-    _require_backup_confirmed(args, "set-telnet-password")
+    if not is_confirmed(args):
+        return _write_dry_run_plan(
+            "account set-telnet-password",
+            "set-telnet-password 会修改 Telnet login password",
+            target={"password_input": _password_input_mode(args)},
+            side_effects={"cfg_set": False},
+        )
     secret = read_secret_from_args(args)
     result = set_telnet_password(_cfg_backend_from_args(args), secret.password)
     result["generated"] = secret.generated
@@ -427,13 +510,24 @@ def command_account_set_telnet_password(args: argparse.Namespace) -> dict[str, A
 
 
 def command_account_set_telnet_username(args: argparse.Namespace) -> dict[str, Any]:
-    require_danger(args, "set-telnet-username 会修改 Telnet login username")
-    _require_backup_confirmed(args, "set-telnet-username")
+    if not is_confirmed(args):
+        return _write_dry_run_plan(
+            "account set-telnet-username",
+            "set-telnet-username 会修改 Telnet login username",
+            target={"name": args.name},
+            side_effects={"cfg_set": False},
+        )
     return set_telnet_username(_cfg_backend_from_args(args), args.name)
 
 
 def command_account_set_su_runtime_password(args: argparse.Namespace) -> dict[str, Any]:
-    require_danger(args, "set-su-runtime-password 会覆写 runtime su password")
+    if not is_confirmed(args):
+        return _write_dry_run_plan(
+            "account set-su-runtime-password",
+            "set-su-runtime-password 会覆写 runtime su password",
+            target={"password_input": _password_input_mode(args)},
+            side_effects={"runtime_password_write": False},
+        )
     secret = read_secret_from_args(args)
     result = set_su_runtime_password(_telnet_shell_from_args(args).run, secret.password)
     result["generated"] = secret.generated
@@ -483,9 +577,17 @@ def command_tr069_plan(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_tr069_harden(args: argparse.Namespace) -> dict[str, Any]:
-    require_danger(args, "tr069 harden 会修改远程管理配置")
-    _require_backup_confirmed(args, "tr069 harden")
+    confirmed = is_confirmed(args)
     result: dict[str, Any] = {"actions": []}
+    if not args.periodic_inform:
+        raise CliError("tr069 harden 至少需要一个 harden 选项")
+    if not confirmed:
+        return _write_dry_run_plan(
+            "tr069 harden",
+            "tr069 harden 会修改远程管理配置",
+            target={"periodic_inform": args.periodic_inform},
+            side_effects={"cfg_set": False},
+        )
     if args.periodic_inform:
         result["actions"].append(
             tr069_harden_periodic_inform(
@@ -493,14 +595,16 @@ def command_tr069_harden(args: argparse.Namespace) -> dict[str, Any]:
                 args.periodic_inform,
             )
         )
-    if not result["actions"]:
-        raise CliError("tr069 harden 至少需要一个 harden 选项")
     return result
 
 
 def command_tr069_randomize_connection_request(args: argparse.Namespace) -> dict[str, Any]:
-    require_danger(args, "tr069 randomize-connection-request 会修改远程管理凭据")
-    _require_backup_confirmed(args, "tr069 randomize-connection-request")
+    if not is_confirmed(args):
+        return _write_dry_run_plan(
+            "tr069 randomize-connection-request",
+            "tr069 randomize-connection-request 会修改远程管理凭据",
+            side_effects={"cfg_set": False, "random_secret_generation": False},
+        )
     return tr069_randomize_connection_request(_cfg_backend_from_args(args))
 
 
@@ -534,13 +638,23 @@ def command_cloud_plan(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_cloud_disable_cloudclt(args: argparse.Namespace) -> dict[str, Any]:
-    require_danger(args, "cloud disable-cloudclt 会停止/禁用 cloud client")
+    if not is_confirmed(args):
+        return _write_dry_run_plan(
+            "cloud disable-cloudclt",
+            "cloud disable-cloudclt 会停止/禁用 cloud client",
+            side_effects={"shell_write": False, "service_stop": False},
+        )
     return cloud_disable_cloudclt(_telnet_shell_from_args(args).run)
 
 
 def command_cloud_disable_smartswitch(args: argparse.Namespace) -> dict[str, Any]:
-    require_danger(args, "cloud disable-smartswitch 会修改 SmartSwitch")
-    _require_backup_confirmed(args, "cloud disable-smartswitch")
+    if not is_confirmed(args):
+        return _write_dry_run_plan(
+            "cloud disable-smartswitch",
+            "cloud disable-smartswitch 会修改 SmartSwitch",
+            target={"SmartSwitch": "0"},
+            side_effects={"cfg_set": False},
+        )
     return cloud_disable_smartswitch(_cfg_backend_from_args(args))
 
 
@@ -576,22 +690,30 @@ def command_simple(func: str, params: dict[str, Any] | None = None) -> Callable[
 
 
 def command_set_result(args: argparse.Namespace) -> dict[str, Any]:
-    require_yes(args, "SetResult 会写入注册结果配置")
+    params = {"result": args.result}
+    if not is_confirmed(args):
+        return _api_write_dry_run_plan(
+            "SetResult",
+            params,
+            "SetResult 会写入注册结果配置",
+        )
     return call_method(args, "SetResult", {"result": args.result})
 
 
 def command_set_port_mirror(args: argparse.Namespace) -> dict[str, Any]:
-    require_yes(args, "SetPortMirror 会修改 port mirror 配置")
-    return call_method(
-        args,
-        "SetPortMirror",
-        {
-            "enable": args.enable,
-            "direction": args.direction,
-            "srcport": args.srcport,
-            "dstport": args.dstport,
-        },
-    )
+    params = {
+        "enable": args.enable,
+        "direction": args.direction,
+        "srcport": args.srcport,
+        "dstport": args.dstport,
+    }
+    if not is_confirmed(args):
+        return _api_write_dry_run_plan(
+            "SetPortMirror",
+            params,
+            "SetPortMirror 会修改 port mirror 配置",
+        )
+    return call_method(args, "SetPortMirror", params)
 
 
 def command_log_download(args: argparse.Namespace) -> dict[str, Any]:
@@ -609,21 +731,36 @@ def command_log_download(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_set_reg_account(args: argparse.Namespace) -> dict[str, Any]:
-    require_yes(args, "SetRegAccount 会修改 operator registration account")
-    return call_method(
-        args,
-        "SetRegAccount",
-        {"regname": args.regname, "regpwd": args.regpwd},
-    )
+    params = {"regname": args.regname, "regpwd": args.regpwd}
+    if not is_confirmed(args):
+        return _api_write_dry_run_plan(
+            "SetRegAccount",
+            params,
+            "SetRegAccount 会修改 operator registration account",
+        )
+    return call_method(args, "SetRegAccount", params)
 
 
 def command_set_pwd_reg_password(args: argparse.Namespace) -> dict[str, Any]:
-    require_yes(args, "SetPwdRegPassword 会修改 CMCC registration password")
-    return call_method(args, "SetPwdRegPassword", {"password": args.password})
+    params = {"password": args.password}
+    if not is_confirmed(args):
+        return _api_write_dry_run_plan(
+            "SetPwdRegPassword",
+            params,
+            "SetPwdRegPassword 会修改 CMCC registration password",
+        )
+    return call_method(args, "SetPwdRegPassword", params)
 
 
 def command_download_file(args: argparse.Namespace) -> dict[str, Any]:
-    require_yes(args, "DownloadFile 会在设备上打包并导出指定文件")
+    params = {"fileName": args.file_name}
+    if not is_confirmed(args):
+        return _api_write_dry_run_plan(
+            "DownloadFile",
+            params,
+            "DownloadFile 会在设备上打包并导出指定文件",
+            side_effects={"api_call": False, "local_download": False},
+        )
     result = call_method(args, "DownloadFile", {"fileName": args.file_name})
     url_value = response_download_url(result["response"])
     if args.output:
@@ -635,7 +772,13 @@ def command_download_file(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_restore_default_settings(args: argparse.Namespace) -> dict[str, Any]:
-    require_extreme(args, "RestoreDefaultSettings 会恢复出厂设置")
+    if not is_confirmed(args):
+        return _api_write_dry_run_plan(
+            "RestoreDefaultSettings",
+            None,
+            "RestoreDefaultSettings 会恢复出厂设置",
+            side_effects={"api_call": False, "factory_reset": False},
+        )
     return call_method(args, "RestoreDefaultSettings")
 
 
@@ -655,45 +798,88 @@ def command_upload_plan(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_reboot(args: argparse.Namespace) -> dict[str, Any]:
-    require_extreme(args, "DeviceReboot 会重启设备")
+    if not is_confirmed(args):
+        return _api_write_dry_run_plan(
+            "DeviceReboot",
+            None,
+            "DeviceReboot 会重启设备",
+            side_effects={"api_call": False, "reboot": False},
+        )
     return call_method(args, "DeviceReboot")
 
 
 def command_set_preconfig(args: argparse.Namespace) -> dict[str, Any]:
-    require_danger(args, "SetPreconfig 会切换地区/运营商预配置")
-    return call_method(args, "SetPreconfig", {"fullname": args.fullname})
+    params = {"fullname": args.fullname}
+    if not is_confirmed(args):
+        return _api_write_dry_run_plan(
+            "SetPreconfig",
+            params,
+            "SetPreconfig 会切换地区/运营商预配置",
+        )
+    return call_method(args, "SetPreconfig", params)
 
 
 def command_telnet_enable(args: argparse.Namespace) -> dict[str, Any]:
-    require_yes(args, "TelnetEnable=1 会启动 runtime Telnet 服务")
+    params = {"telnet": "1"}
+    if not is_confirmed(args):
+        return _api_write_dry_run_plan(
+            "TelnetEnable",
+            params,
+            "TelnetEnable=1 会启动 runtime Telnet 服务",
+            side_effects={"api_call": False, "telnet_state_change": False},
+        )
     result = call_method(args, "TelnetEnable", {"telnet": "1"})
     result["telnet_port_open"] = tcp_open(result["ip"], 23, args.timeout)
     return result
 
 
 def command_telnet_disable(args: argparse.Namespace) -> dict[str, Any]:
-    require_danger(args, "TelnetEnable=0 会关闭 runtime Telnet 服务")
+    params = {"telnet": "0"}
+    if not is_confirmed(args):
+        return _api_write_dry_run_plan(
+            "TelnetEnable",
+            params,
+            "TelnetEnable=0 会关闭 runtime Telnet 服务",
+            side_effects={"api_call": False, "telnet_state_change": False},
+        )
     result = call_method(args, "TelnetEnable", {"telnet": "0"})
     result["telnet_port_open"] = tcp_open(result["ip"], 23, args.timeout)
     return result
 
 
 def command_set_fh_debug_log(args: argparse.Namespace) -> dict[str, Any]:
-    require_danger(args, "SetFHDebugLog 会执行设备上的 debug shell script")
-    return call_method(args, "SetFHDebugLog", {"module": args.module, "data": args.data})
+    params = {"module": args.module, "data": args.data}
+    if not is_confirmed(args):
+        return _api_write_dry_run_plan(
+            "SetFHDebugLog",
+            params,
+            "SetFHDebugLog 会执行设备上的 debug shell script",
+        )
+    return call_method(args, "SetFHDebugLog", params)
 
 
 def command_close_fh_debug_log(args: argparse.Namespace) -> dict[str, Any]:
-    require_yes(args, "CloseFHDebugLog 会修改 debug log 配置")
+    if not is_confirmed(args):
+        return _api_write_dry_run_plan(
+            "CloseFHDebugLog",
+            None,
+            "CloseFHDebugLog 会修改 debug log 配置",
+        )
     return call_method(args, "CloseFHDebugLog")
 
 
 def command_open_fh_debug_log(args: argparse.Namespace) -> dict[str, Any]:
-    require_yes(args, "OpenFHDebugLog 会修改 debug log 配置")
+    if not is_confirmed(args):
+        return _api_write_dry_run_plan(
+            "OpenFHDebugLog",
+            None,
+            "OpenFHDebugLog 会修改 debug log 配置",
+        )
     return call_method(args, "OpenFHDebugLog")
 
 
 def command_raw_call(args: argparse.Namespace) -> dict[str, Any]:
+    confirmed = is_confirmed(args)
     params: dict[str, Any] = {}
     if args.json_payload:
         params.update(parse_json_object(args.json_payload))
@@ -701,8 +887,12 @@ def command_raw_call(args: argparse.Namespace) -> dict[str, Any]:
 
     risky_prefixes = ("Set", "Close", "Open", "Restore", "Device", "Upload")
     if args.func.startswith(risky_prefixes) or args.func == "TelnetEnable":
-        if not args.allow_risky:
-            raise CliError("raw call 调用 risky func 需要 --allow-risky")
+        if not confirmed:
+            return _api_write_dry_run_plan(
+                args.func,
+                params,
+                f"raw call {args.func} 可能改变设备状态",
+            )
 
     return call_method(args, args.func, params)
 
@@ -722,9 +912,7 @@ def command_download_url(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_upload(args: argparse.Namespace) -> dict[str, Any]:
-    dry_run = args.dry_run
-    if not dry_run:
-        require_extreme(args, "upload 会写入 firmware/preconfig staging path")
+    dry_run = not is_confirmed(args)
     ip, ip_source = resolve_ip(args)
     file_path = Path(args.file).expanduser()
     result = upload_file(
@@ -736,6 +924,8 @@ def command_upload(args: argparse.Namespace) -> dict[str, Any]:
         dry_run=dry_run,
     )
     result["ip_source"] = ip_source
+    if dry_run:
+        _attach_dry_run_notice(result)
     return result
 
 

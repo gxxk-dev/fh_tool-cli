@@ -64,6 +64,7 @@ class WebWritePayloadTests(unittest.TestCase):
         )
 
         self.assertTrue(result["dry_run"])
+        self.assertIn("--confirm", result["hint"])
         self.assertEqual(
             result["payload"],
             {
@@ -348,7 +349,7 @@ class WebWritePayloadTests(unittest.TestCase):
                     ]
                 )
 
-    def test_execute_requires_backup_before_client_creation(self) -> None:
+    def test_old_execute_flags_are_deprecated_before_client_creation(self) -> None:
         args = parse_args(
             [
                 "web",
@@ -359,15 +360,13 @@ class WebWritePayloadTests(unittest.TestCase):
                 "--enabled",
                 "0",
                 "--execute",
-                "--yes",
-                "--danger",
                 "--ip",
                 "192.168.1.1",
             ]
         )
 
         with patch("fh_tool_cli.commands.web._web_client_from_args", side_effect=AssertionError("client used")):
-            with self.assertRaisesRegex(CliError, "--backup-confirmed"):
+            with self.assertRaisesRegex(CliError, "已弃用"):
                 args.handler(args)
 
 

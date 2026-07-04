@@ -47,23 +47,54 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="输出 machine-readable JSON")
 
 
-def add_yes(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--yes", action="store_true", help="确认执行会改变设备状态的动作")
-
-
-def add_danger(parser: argparse.ArgumentParser) -> None:
-    add_yes(parser)
-    parser.add_argument("--danger", action="store_true", help="确认执行高风险动作")
-
-
-def add_extreme(parser: argparse.ArgumentParser) -> None:
-    add_danger(parser)
+def add_confirm(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--i-know-this-can-break-my-device",
-        dest="i_know_this_can_break_my_device",
+        "--confirm",
         action="store_true",
-        help="确认该动作可能导致设备断网、重启或恢复出厂",
+        help="确认执行写入；不加时只输出 dry-run 计划",
     )
+
+
+def add_deprecated_confirmation_options(
+    parser: argparse.ArgumentParser,
+    *,
+    yes: bool = True,
+    danger: bool = True,
+    extreme: bool = True,
+    backup_confirmed: bool = True,
+    execute: bool = True,
+    dry_run: bool = True,
+    allow_risky: bool = True,
+) -> None:
+    if yes:
+        parser.add_argument("--yes", dest="deprecated_yes", action="store_true", help=argparse.SUPPRESS)
+    if danger:
+        parser.add_argument("--danger", dest="deprecated_danger", action="store_true", help=argparse.SUPPRESS)
+    if extreme:
+        parser.add_argument(
+            "--i-know-this-can-break-my-device",
+            dest="deprecated_extreme",
+            action="store_true",
+            help=argparse.SUPPRESS,
+        )
+    if backup_confirmed:
+        parser.add_argument(
+            "--backup-confirmed",
+            dest="deprecated_backup_confirmed",
+            action="store_true",
+            help=argparse.SUPPRESS,
+        )
+    if execute:
+        parser.add_argument("--execute", dest="deprecated_execute", action="store_true", help=argparse.SUPPRESS)
+    if dry_run:
+        parser.add_argument("--dry-run", dest="deprecated_dry_run", action="store_true", help=argparse.SUPPRESS)
+    if allow_risky:
+        parser.add_argument("--allow-risky", dest="deprecated_allow_risky", action="store_true", help=argparse.SUPPRESS)
+
+
+def add_write_confirmation(parser: argparse.ArgumentParser) -> None:
+    add_confirm(parser)
+    add_deprecated_confirmation_options(parser)
 
 
 def add_telnet_options(
@@ -156,7 +187,7 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
     config_decrypt.add_argument("--input", required=True, help="usrconfig_conf 输入文件")
     config_decrypt.add_argument("--attr", help="可选 attrconfig_conf 输入文件")
     config_decrypt.add_argument("--output", help="写入 decrypted JSON；默认输出到 stdout")
-    config_decrypt.add_argument("--redact", action="store_true", help="默认行为：脱敏 sensitive 值")
+    config_decrypt.add_argument("--redact", dest="deprecated_redact", action="store_true", help=argparse.SUPPRESS)
     config_decrypt.add_argument("--reveal-secrets", action="store_true", help="输出 sensitive 明文")
     config_decrypt.add_argument("--key", help="encrymode=2 AES-128 static key 文本，必须 16 bytes")
     config_decrypt.add_argument("--key-hex", help="encrymode=2 AES-128 static key hex，必须 16 bytes")
@@ -188,7 +219,7 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
         default="local",
         help="恢复目标：local 写入本地/fake root；device 通过 Telnet 写入设备",
     )
-    restore_backup.add_argument("--target-root", help="local 恢复目标根目录；local --execute 时必须显式指定")
+    restore_backup.add_argument("--target-root", help="local 恢复目标根目录；local --confirm 时必须显式指定")
     restore_backup.add_argument(
         "--remote-tmpdir",
         default=DEFAULT_DEVICE_RESTORE_TMPDIR,
@@ -201,16 +232,8 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
         help=f"device restore base64 分片大小，默认 {DEFAULT_DEVICE_RESTORE_CHUNK_SIZE}",
     )
     restore_backup.add_argument("--path", action="append", default=[], help="只恢复指定设备路径，可重复")
-    restore_mode = restore_backup.add_mutually_exclusive_group()
-    restore_mode.add_argument(
-        "--dry-run",
-        dest="execute",
-        action="store_false",
-        help="只解析、校验并展示计划；默认行为",
-    )
-    restore_mode.add_argument("--execute", action="store_true", help="执行恢复写入")
-    add_extreme(restore_backup)
-    restore_backup.set_defaults(handler=_handler(handlers, "command_restore_backup"), execute=False)
+    add_write_confirmation(restore_backup)
+    restore_backup.set_defaults(handler=_handler(handlers, "command_restore_backup"))
 
     credentials = subparsers.add_parser("credentials", help="只读派生/展示光猫管理面凭据候选")
     credentials_subparsers = credentials.add_subparsers(
@@ -247,10 +270,9 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
     cfg_get.set_defaults(handler=_handler(handlers, "command_cfg_get"))
     cfg_set = cfg_subparsers.add_parser("set", help="写入 cfg_cmd PATH VALUE")
     add_cfg_backend_options(cfg_set)
-    add_danger(cfg_set)
+    add_write_confirmation(cfg_set)
     cfg_set.add_argument("path")
     cfg_set.add_argument("value")
-    cfg_set.add_argument("--backup-confirmed", action="store_true", help="确认已完成备份")
     cfg_set.set_defaults(handler=_handler(handlers, "command_cfg_set"))
     cfg_attr = cfg_subparsers.add_parser("attr", help="读取 cfg_cmd attr PATH")
     add_cfg_backend_options(cfg_attr)
@@ -296,9 +318,8 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
         password_stdin_arg="--telnet-password-stdin",
         password_stdin_dest="telnet_password_stdin",
     )
-    add_yes(account_web_password)
+    add_write_confirmation(account_web_password)
     add_password_input_options(account_web_password)
-    account_web_password.add_argument("--backup-confirmed", action="store_true", help="确认已完成备份")
     account_web_password.set_defaults(handler=_handler(handlers, "command_account_set_web_admin_password"))
     account_telnet_password = account_subparsers.add_parser(
         "set-telnet-password",
@@ -311,9 +332,8 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
         password_stdin_arg="--telnet-password-stdin",
         password_stdin_dest="telnet_password_stdin",
     )
-    add_yes(account_telnet_password)
+    add_write_confirmation(account_telnet_password)
     add_password_input_options(account_telnet_password)
-    account_telnet_password.add_argument("--backup-confirmed", action="store_true", help="确认已完成备份")
     account_telnet_password.set_defaults(handler=_handler(handlers, "command_account_set_telnet_password"))
     account_telnet_username = account_subparsers.add_parser(
         "set-telnet-username",
@@ -326,9 +346,8 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
         password_stdin_arg="--telnet-password-stdin",
         password_stdin_dest="telnet_password_stdin",
     )
-    add_danger(account_telnet_username)
+    add_write_confirmation(account_telnet_username)
     account_telnet_username.add_argument("--name", required=True)
-    account_telnet_username.add_argument("--backup-confirmed", action="store_true", help="确认已完成备份")
     account_telnet_username.set_defaults(handler=_handler(handlers, "command_account_set_telnet_username"))
     account_su_password = account_subparsers.add_parser(
         "set-su-runtime-password",
@@ -341,7 +360,7 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
         password_stdin_arg="--telnet-password-stdin",
         password_stdin_dest="telnet_password_stdin",
     )
-    add_danger(account_su_password)
+    add_write_confirmation(account_su_password)
     add_password_input_options(account_su_password)
     account_su_password.set_defaults(handler=_handler(handlers, "command_account_set_su_runtime_password"))
 
@@ -386,17 +405,15 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
     tr069_plan_parser.set_defaults(handler=_handler(handlers, "command_tr069_plan"))
     tr069_harden = tr069_subparsers.add_parser("harden", help="按选项加固 TR-069 配置")
     add_telnet_options(tr069_harden)
-    add_danger(tr069_harden)
+    add_write_confirmation(tr069_harden)
     tr069_harden.add_argument("--periodic-inform", choices=["off", "on"], help="设置 PeriodicInformEnable")
-    tr069_harden.add_argument("--backup-confirmed", action="store_true", help="确认已完成备份")
     tr069_harden.set_defaults(handler=_handler(handlers, "command_tr069_harden"))
     tr069_randomize = tr069_subparsers.add_parser(
         "randomize-connection-request",
         help="随机化 TR-069 connection request 凭据",
     )
     add_telnet_options(tr069_randomize)
-    add_danger(tr069_randomize)
-    tr069_randomize.add_argument("--backup-confirmed", action="store_true", help="确认已完成备份")
+    add_write_confirmation(tr069_randomize)
     tr069_randomize.set_defaults(handler=_handler(handlers, "command_tr069_randomize_connection_request"))
 
     cloud = subparsers.add_parser("cloud", help="CloudPlat 状态、endpoint 和计划")
@@ -424,19 +441,14 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
     cloud_plan_parser.set_defaults(handler=_handler(handlers, "command_cloud_plan"))
     cloud_disable = cloud_subparsers.add_parser("disable-cloudclt", help="停止/禁用 SAF cloud client")
     add_telnet_options(cloud_disable)
-    add_danger(cloud_disable)
+    add_write_confirmation(cloud_disable)
     cloud_disable.set_defaults(handler=_handler(handlers, "command_cloud_disable_cloudclt"))
     cloud_disable_smartswitch_parser = cloud_subparsers.add_parser(
         "disable-smartswitch",
         help="设置 SmartSwitch=0 并回读验证",
     )
     add_telnet_options(cloud_disable_smartswitch_parser)
-    add_danger(cloud_disable_smartswitch_parser)
-    cloud_disable_smartswitch_parser.add_argument(
-        "--backup-confirmed",
-        action="store_true",
-        help="确认已完成备份",
-    )
+    add_write_confirmation(cloud_disable_smartswitch_parser)
     cloud_disable_smartswitch_parser.set_defaults(handler=_handler(handlers, "command_cloud_disable_smartswitch"))
 
     register_web_commands(subparsers)
@@ -551,13 +563,13 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
 
     set_result = subparsers.add_parser("set-result", help="写入 registration result")
     add_common_options(set_result)
-    add_yes(set_result)
+    add_write_confirmation(set_result)
     set_result.add_argument("--result", required=True)
     set_result.set_defaults(handler=_handler(handlers, "command_set_result"))
 
     set_port_mirror = subparsers.add_parser("set-port-mirror", help="写入 port mirror 配置")
     add_common_options(set_port_mirror)
-    add_yes(set_port_mirror)
+    add_write_confirmation(set_port_mirror)
     set_port_mirror.add_argument("--enable", required=True)
     set_port_mirror.add_argument("--direction", required=True)
     set_port_mirror.add_argument("--srcport", required=True)
@@ -566,27 +578,27 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
 
     set_reg_account = subparsers.add_parser("set-reg-account", help="写入 registration account")
     add_common_options(set_reg_account)
-    add_yes(set_reg_account)
+    add_write_confirmation(set_reg_account)
     set_reg_account.add_argument("--regname", required=True)
     set_reg_account.add_argument("--regpwd", required=True)
     set_reg_account.set_defaults(handler=_handler(handlers, "command_set_reg_account"))
 
     set_pwd_reg_password = subparsers.add_parser("set-pwd-reg-password", help="写入 CMCC registration password")
     add_common_options(set_pwd_reg_password)
-    add_yes(set_pwd_reg_password)
+    add_write_confirmation(set_pwd_reg_password)
     set_pwd_reg_password.add_argument("--password", required=True)
     set_pwd_reg_password.set_defaults(handler=_handler(handlers, "command_set_pwd_reg_password"))
 
     download_file = subparsers.add_parser("download-file", help="调用 DownloadFile 并保存返回文件")
     add_common_options(download_file)
-    add_yes(download_file)
+    add_write_confirmation(download_file)
     download_file.add_argument("--file-name", required=True)
     download_file.add_argument("--output", help="本地保存路径；默认使用返回文件名")
     download_file.set_defaults(handler=_handler(handlers, "command_download_file"))
 
     restore = subparsers.add_parser("restore-default-settings", help="恢复出厂设置")
     add_common_options(restore)
-    add_extreme(restore)
+    add_write_confirmation(restore)
     restore.set_defaults(handler=_handler(handlers, "command_restore_default_settings"))
 
     upload_prepare = subparsers.add_parser("upload-prepare", help="调用 UploadPrepare 获取 sessionid")
@@ -601,12 +613,12 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
 
     reboot = subparsers.add_parser("reboot", help="重启设备")
     add_common_options(reboot)
-    add_extreme(reboot)
+    add_write_confirmation(reboot)
     reboot.set_defaults(handler=_handler(handlers, "command_reboot"))
 
     set_preconfig = subparsers.add_parser("set-preconfig", help="切换 preconfig")
     add_common_options(set_preconfig)
-    add_danger(set_preconfig)
+    add_write_confirmation(set_preconfig)
     set_preconfig.add_argument("--fullname", required=True)
     set_preconfig.set_defaults(handler=_handler(handlers, "command_set_preconfig"))
 
@@ -619,28 +631,28 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
     )
     telnet_enable = telnet_subparsers.add_parser("enable", help="调用 TelnetEnable=1")
     add_common_options(telnet_enable)
-    add_yes(telnet_enable)
+    add_write_confirmation(telnet_enable)
     telnet_enable.set_defaults(handler=_handler(handlers, "command_telnet_enable"))
     telnet_disable = telnet_subparsers.add_parser("disable", help="调用 TelnetEnable=0")
     add_common_options(telnet_disable)
-    add_danger(telnet_disable)
+    add_write_confirmation(telnet_disable)
     telnet_disable.set_defaults(handler=_handler(handlers, "command_telnet_disable"))
 
     set_fh_debug_log = subparsers.add_parser("set-fh-debug-log", help="调用 SetFHDebugLog")
     add_common_options(set_fh_debug_log)
-    add_danger(set_fh_debug_log)
+    add_write_confirmation(set_fh_debug_log)
     set_fh_debug_log.add_argument("--module", required=True)
     set_fh_debug_log.add_argument("--data", required=True)
     set_fh_debug_log.set_defaults(handler=_handler(handlers, "command_set_fh_debug_log"))
 
     close_fh_debug_log = subparsers.add_parser("close-fh-debug-log", help="关闭 FH debug log")
     add_common_options(close_fh_debug_log)
-    add_yes(close_fh_debug_log)
+    add_write_confirmation(close_fh_debug_log)
     close_fh_debug_log.set_defaults(handler=_handler(handlers, "command_close_fh_debug_log"))
 
     open_fh_debug_log = subparsers.add_parser("open-fh-debug-log", help="开启 FH debug log")
     add_common_options(open_fh_debug_log)
-    add_yes(open_fh_debug_log)
+    add_write_confirmation(open_fh_debug_log)
     open_fh_debug_log.set_defaults(handler=_handler(handlers, "command_open_fh_debug_log"))
 
     raw_call = subparsers.add_parser("call", help="原始 fh_tool/api 调用")
@@ -648,7 +660,8 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
     raw_call.add_argument("--func", required=True, help="要调用的 fh_tool/api 方法名")
     raw_call.add_argument("--param", action="append", default=[], help="k=v，可重复")
     raw_call.add_argument("--json-payload", help="额外 JSON 对象参数")
-    raw_call.add_argument("--allow-risky", action="store_true", help="允许原始调用高风险方法")
+    add_confirm(raw_call)
+    add_deprecated_confirmation_options(raw_call)
     raw_call.set_defaults(handler=_handler(handlers, "command_raw_call"))
 
     download_url = subparsers.add_parser("download-url", help="下载 /fh_tool/tool_download 返回文件")
@@ -659,11 +672,10 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
 
     upload = subparsers.add_parser("upload", help="调用 /fh_tool/upload")
     add_common_options(upload)
-    add_extreme(upload)
+    add_write_confirmation(upload)
     upload.add_argument("--action", choices=sorted(UPLOAD_ACTIONS), required=True)
     upload.add_argument("--file", required=True)
     upload.add_argument("--sessionid", required=True)
-    upload.add_argument("--dry-run", action="store_true", help="只校验并显示上传计划，不发送文件")
     upload.set_defaults(handler=_handler(handlers, "command_upload"))
 
     return parser

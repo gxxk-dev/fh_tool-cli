@@ -33,26 +33,30 @@ class ParserRegistrationTests(unittest.TestCase):
                 "set",
                 "InternetGatewayDevice.DeviceInfo.Name",
                 "new",
-                "--yes",
-                "--danger",
-                "--backup-confirmed",
+                "--confirm",
             ]
         )
-        self.assertTrue(cfg_set.yes)
-        self.assertTrue(cfg_set.danger)
-        self.assertTrue(cfg_set.backup_confirmed)
+        self.assertTrue(cfg_set.confirm)
 
         reboot = cli.parse_args(
             [
                 "reboot",
                 "--ip",
                 "192.168.1.1",
-                "--yes",
-                "--danger",
-                "--i-know-this-can-break-my-device",
+                "--confirm",
             ]
         )
-        self.assertTrue(reboot.i_know_this_can_break_my_device)
+        self.assertTrue(reboot.confirm)
+
+        deprecated = cli.parse_args(
+            [
+                "reboot",
+                "--ip",
+                "192.168.1.1",
+                "--yes",
+            ]
+        )
+        self.assertTrue(deprecated.deprecated_yes)
 
     def test_web_write_gate_flags_survive_parser_split(self) -> None:
         args = cli.parse_args(
@@ -62,19 +66,13 @@ class ParserRegistrationTests(unittest.TestCase):
                 "set",
                 "--param",
                 "Enable=1",
-                "--execute",
-                "--backup-confirmed",
-                "--yes",
-                "--danger",
+                "--confirm",
                 "--ip",
                 "192.168.1.1",
             ]
         )
 
-        self.assertTrue(args.execute)
-        self.assertTrue(args.backup_confirmed)
-        self.assertTrue(args.yes)
-        self.assertTrue(args.danger)
+        self.assertTrue(args.confirm)
 
     def test_new_web_subcommands_bind_handlers(self) -> None:
         cases = [

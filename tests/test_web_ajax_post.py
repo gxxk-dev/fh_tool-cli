@@ -43,9 +43,32 @@ class WebAjaxPostCliTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "dry-run")
         self.assertEqual(result["request"], {"Enable": "1"})
+        self.assertIn("--confirm", result["hint"])
         self.assertEqual(client.calls, [("raw_post", ("set_fake", {"Enable": "1"}, True))])
 
-    def test_web_ajax_post_execute_requires_backup_confirmed(self) -> None:
+    def test_web_ajax_post_confirm_executes(self) -> None:
+        client = RecordingWebClient()
+        args = parse_args(
+            [
+                "web",
+                "ajax",
+                "post",
+                "set_fake",
+                "--param",
+                "Enable=1",
+                "--confirm",
+                "--ip",
+                "192.168.1.1",
+            ]
+        )
+
+        with patch("fh_tool_cli.commands.web._web_client_from_args", return_value=client):
+            result = args.handler(args)
+
+        self.assertEqual(result["status"], "executed")
+        self.assertEqual(client.calls, [("raw_post", ("set_fake", {"Enable": "1"}, False))])
+
+    def test_web_ajax_post_old_execute_flags_are_deprecated(self) -> None:
         args = parse_args(
             [
                 "web",
@@ -55,52 +78,12 @@ class WebAjaxPostCliTests(unittest.TestCase):
                 "--param",
                 "Enable=1",
                 "--execute",
-                "--yes",
-                "--danger",
                 "--ip",
                 "192.168.1.1",
             ]
         )
 
-        with self.assertRaisesRegex(CliError, "--backup-confirmed"):
-            args.handler(args)
-
-    def test_web_ajax_post_execute_requires_yes_and_danger(self) -> None:
-        args = parse_args(
-            [
-                "web",
-                "ajax",
-                "post",
-                "set_fake",
-                "--param",
-                "Enable=1",
-                "--execute",
-                "--backup-confirmed",
-                "--ip",
-                "192.168.1.1",
-            ]
-        )
-
-        with self.assertRaisesRegex(CliError, "--yes"):
-            args.handler(args)
-
-        args = parse_args(
-            [
-                "web",
-                "ajax",
-                "post",
-                "set_fake",
-                "--param",
-                "Enable=1",
-                "--execute",
-                "--backup-confirmed",
-                "--yes",
-                "--ip",
-                "192.168.1.1",
-            ]
-        )
-
-        with self.assertRaisesRegex(CliError, "--danger"):
+        with self.assertRaisesRegex(CliError, "已弃用"):
             args.handler(args)
 
     def test_web_ajax_post_refuses_empty_payload_without_explicit_flag(self) -> None:

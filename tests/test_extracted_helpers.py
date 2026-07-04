@@ -6,7 +6,7 @@ import unittest
 from fh_tool_cli.config_store import format_mac, normalize_ip, normalize_mac
 from fh_tool_cli.crypto import decrypt_payload, derive_crypto, encrypt_payload
 from fh_tool_cli.errors import CliError
-from fh_tool_cli.risk import require_danger, require_extreme, require_yes
+from fh_tool_cli.risk import dry_run_notice, is_confirmed, reject_deprecated_confirmation_args
 
 
 class CryptoTests(unittest.TestCase):
@@ -32,34 +32,19 @@ class ConfigStoreTests(unittest.TestCase):
 
 
 class RiskTests(unittest.TestCase):
-    def test_write_gate_requires_yes(self) -> None:
-        with self.assertRaises(CliError):
-            require_yes(argparse.Namespace(yes=False), "write")
+    def test_confirm_gate_is_single_execution_flag(self) -> None:
+        self.assertFalse(is_confirmed(argparse.Namespace(confirm=False)))
+        self.assertTrue(is_confirmed(argparse.Namespace(confirm=True)))
 
-        require_yes(argparse.Namespace(yes=True), "write")
+    def test_deprecated_confirmation_flags_are_rejected(self) -> None:
+        with self.assertRaisesRegex(CliError, "已弃用"):
+            reject_deprecated_confirmation_args(argparse.Namespace(deprecated_yes=True))
 
-    def test_danger_and_extreme_gates_require_layered_flags(self) -> None:
-        with self.assertRaises(CliError):
-            require_danger(argparse.Namespace(yes=True, danger=False), "danger")
-        require_danger(argparse.Namespace(yes=True, danger=True), "danger")
-
-        with self.assertRaises(CliError):
-            require_extreme(
-                argparse.Namespace(
-                    yes=True,
-                    danger=True,
-                    i_know_this_can_break_my_device=False,
-                ),
-                "extreme",
-            )
-        require_extreme(
-            argparse.Namespace(
-                yes=True,
-                danger=True,
-                i_know_this_can_break_my_device=True,
-            ),
-            "extreme",
-        )
+    def test_dry_run_notice_points_to_confirm(self) -> None:
+        notice = dry_run_notice()
+        self.assertTrue(notice["dry_run"])
+        self.assertFalse(notice["executed"])
+        self.assertEqual(notice["confirm_requires"], ["--confirm"])
 
 
 if __name__ == "__main__":
