@@ -1,409 +1,111 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
-import ipaddress
 import json
-import os
-import platform
-import re
-import socket
-import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urljoin
 
 import requests
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.padding import PKCS7
 
-DEFAULT_IP = "192.168.1.1"
-FH_TOOL_API_PATH = "/fh_tool/api"
-FH_TOOL_UPLOAD_PATH = "/fh_tool/upload"
-DEFAULT_PORTS = "23,80,443,8080"
-DEFAULT_CONFIG_PATH = Path(
-    os.environ.get("FH_TOOL_CLI_CONFIG", "~/.config/fh_tool-cli/config.json")
-).expanduser()
-
-
-@dataclass(frozen=True)
-class FHToolCrypto:
-    key: bytes
-    iv: bytes
-    digest: str
-
-
-class CliError(RuntimeError):
-    pass
-
-
-class FHToolError(RuntimeError):
-    pass
-
-
-def normalize_ip(value: str) -> str:
-    try:
-        ip = ipaddress.ip_address(value.strip())
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("不符规范的 IP 地址") from exc
-    if ip.version != 4:
-        raise argparse.ArgumentTypeError("目前只支持 IPv4 网关地址")
-    return str(ip)
-
-
-def normalize_mac(value: str) -> str:
-    mac = value.strip().upper().replace(":", "").replace("-", "")
-    if not re.fullmatch(r"[A-F0-9]{12}", mac):
-        raise argparse.ArgumentTypeError("不符规范的 MAC 地址，应为 AABBCCDDEEFF 格式")
-    return mac
-
-
-def format_mac(mac: str) -> str:
-    return ":".join(mac[i : i + 2] for i in range(0, 12, 2))
-
-
-def decode_text(data: bytes) -> str:
-    return data.decode("utf-8", errors="ignore")
-
-
-def run_output(command: list[str]) -> str | None:
-    try:
-        return decode_text(subprocess.check_output(command, stderr=subprocess.DEVNULL))
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
-
-
-def detect_default_gateway() -> str | None:
-    system = platform.system()
-    commands: list[list[str]]
-
-    if system == "Windows":
-        commands = [["route", "print", "-4", "0.0.0.0"]]
-    elif system == "Darwin":
-        commands = [["route", "-n", "get", "default"]]
-    else:
-        commands = [["ip", "-4", "route", "show", "default"], ["route", "-n"]]
-
-    for command in commands:
-        output = run_output(command)
-        if not output:
-            continue
-
-        if system == "Darwin":
-            match = re.search(r"gateway:\s*(\d{1,3}(?:\.\d{1,3}){3})", output)
-            if match:
-                return normalize_ip(match.group(1))
-            continue
-
-        if command[:2] == ["ip", "-4"]:
-            match = re.search(r"\bdefault\s+via\s+(\d{1,3}(?:\.\d{1,3}){3})", output)
-            if match:
-                return normalize_ip(match.group(1))
-            continue
-
-        for line in output.splitlines():
-            if "0.0.0.0" not in line:
-                continue
-            candidates = re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", line)
-            for candidate in candidates:
-                if candidate != "0.0.0.0":
-                    return normalize_ip(candidate)
-
-    return None
-
-
-def get_mac_address(ip: str) -> str | None:
-    system = platform.system()
-    commands: list[list[str]]
-
-    if system == "Windows":
-        commands = [["arp", "-a", ip]]
-    elif system == "Darwin":
-        commands = [["arp", "-n", ip]]
-    else:
-        commands = [["ip", "neigh", "show", ip], ["arp", "-n", ip]]
-
-    for command in commands:
-        output = run_output(command)
-        if not output:
-            continue
-        match = re.search(
-            r"([A-Fa-f0-9]{2}(?::[A-Fa-f0-9]{2}){5}|[A-Fa-f0-9]{2}(?:-[A-Fa-f0-9]{2}){5})",
-            output,
-        )
-        if match:
-            return normalize_mac(match.group(1))
-
-    return None
-
-
-def load_config(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise CliError(f"配置文件读取失败: {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise CliError(f"配置文件格式错误: {path}")
-    return data
-
-
-def save_config(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-
-
-def config_path_from_args(args: argparse.Namespace) -> Path:
-    return Path(args.config).expanduser()
-
-
-def resolve_ip(args: argparse.Namespace) -> tuple[str, str]:
-    config = load_config(config_path_from_args(args))
-    if args.ip:
-        return args.ip, "argument"
-    if config.get("ip"):
-        return normalize_ip(str(config["ip"])), "config"
-    detected = detect_default_gateway()
-    if detected:
-        return detected, "default_gateway"
-    return DEFAULT_IP, "fallback"
-
-
-def resolve_mac(
-    args: argparse.Namespace,
-    ip: str,
-    *,
-    required: bool,
-    allow_prompt: bool = True,
-) -> tuple[str | None, str]:
-    config = load_config(config_path_from_args(args))
-    if args.mac:
-        return normalize_mac(args.mac), "argument"
-    if config.get("mac"):
-        return normalize_mac(str(config["mac"])), "config"
-
-    detected = get_mac_address(ip)
-    if detected:
-        return detected, "arp"
-
-    if getattr(args, "ask_mac", False) and allow_prompt and not getattr(args, "json", False):
-        manual = input("请手动输入网关 MAC(AABBCCDDEEFF): ")
-        return normalize_mac(manual), "prompt"
-
-    if required:
-        raise CliError("缺少网关 MAC。请使用 --mac AABBCCDDEEFF，或先运行 config set。")
-    return None, "missing"
-
-
-def derive_crypto(mac: str) -> FHToolCrypto:
-    digest = hashlib.sha256(mac.encode("ascii")).hexdigest()
-    key = "".join(digest[2 * i + 2] for i in range(16)).encode("ascii")
-    iv = "".join(digest[3 * i + 3] for i in range(16)).encode("ascii")
-    return FHToolCrypto(key=key, iv=iv, digest=digest)
-
-
-def pkcs7_pad(data: bytes) -> bytes:
-    padder = PKCS7(128).padder()
-    return padder.update(data) + padder.finalize()
-
-
-def pkcs7_unpad(data: bytes) -> bytes:
-    unpadder = PKCS7(128).unpadder()
-    return unpadder.update(data) + unpadder.finalize()
-
-
-def encrypt_payload(payload: dict[str, Any], crypto: FHToolCrypto) -> str:
-    plaintext = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
-        "utf-8"
-    )
-    encryptor = Cipher(algorithms.AES(crypto.key), modes.CBC(crypto.iv)).encryptor()
-    ciphertext = encryptor.update(pkcs7_pad(plaintext)) + encryptor.finalize()
-    return base64.b64encode(ciphertext).decode("ascii")
-
-
-def decrypt_payload(body: str, crypto: FHToolCrypto) -> dict[str, Any]:
-    raw = base64.b64decode(body.strip())
-    decryptor = Cipher(algorithms.AES(crypto.key), modes.CBC(crypto.iv)).decryptor()
-    plaintext = pkcs7_unpad(decryptor.update(raw) + decryptor.finalize())
-    return json.loads(plaintext.decode("utf-8"))
-
-
-def fh_tool_call(
-    ip: str,
-    mac: str,
-    payload: dict[str, Any],
-    timeout: float,
-) -> dict[str, Any]:
-    crypto = derive_crypto(mac)
-    encrypted = encrypt_payload(payload, crypto)
-    url = f"http://{ip}:8080{FH_TOOL_API_PATH}"
-    try:
-        response = requests.post(
-            url,
-            data=encrypted,
-            headers={
-                "Content-Type": "text/plain",
-                "Connection": "close",
-            },
-            timeout=timeout,
-            allow_redirects=False,
-        )
-    except requests.RequestException as exc:
-        raise FHToolError(f"无法连接 {url}: {exc}") from exc
-
-    if response.status_code != 200:
-        raise FHToolError(f"{FH_TOOL_API_PATH} 返回 HTTP {response.status_code}")
-
-    try:
-        return decrypt_payload(response.text, crypto)
-    except Exception as exc:
-        raise FHToolError("响应解密失败，MAC 可能不匹配或固件协议不同") from exc
-
-
-def tcp_open(ip: str, port: int, timeout: float) -> bool:
-    try:
-        with socket.create_connection((ip, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def parse_ports(value: str) -> list[int]:
-    ports: list[int] = []
-    for part in value.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            port = int(part, 10)
-        except ValueError as exc:
-            raise argparse.ArgumentTypeError(f"不符规范的 port: {part}") from exc
-        if not 1 <= port <= 65535:
-            raise argparse.ArgumentTypeError(f"port 超出范围: {part}")
-        ports.append(port)
-    if not ports:
-        raise argparse.ArgumentTypeError("至少需要一个 port")
-    return ports
-
-
-def parse_scalar(value: str) -> Any:
-    lowered = value.lower()
-    if lowered == "true":
-        return True
-    if lowered == "false":
-        return False
-    if lowered == "null":
-        return None
-    return value
-
-
-def parse_kv(values: list[str]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for value in values:
-        if "=" not in value:
-            raise CliError(f"--param 需要 k=v 格式: {value}")
-        key, raw = value.split("=", 1)
-        key = key.strip()
-        if not key:
-            raise CliError(f"--param key 不能为空: {value}")
-        result[key] = parse_scalar(raw)
-    return result
-
-
-def parse_json_object(value: str) -> dict[str, Any]:
-    try:
-        data = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise CliError(f"JSON 解析失败: {exc}") from exc
-    if not isinstance(data, dict):
-        raise CliError("JSON payload 必须是 object")
-    return data
-
-
-def api_payload(func: str, params: dict[str, Any] | None = None, index: str = "1") -> dict[str, Any]:
-    payload: dict[str, Any] = {"index": str(index), "func": func}
-    if params:
-        payload.update(params)
-    return payload
-
-
-def call_method(args: argparse.Namespace, func: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    ip, ip_source = resolve_ip(args)
-    mac, mac_source = resolve_mac(args, ip, required=True)
-    assert mac is not None
-    response = fh_tool_call(ip, mac, api_payload(func, params), args.timeout)
-    return {
-        "ip": ip,
-        "ip_source": ip_source,
-        "mac": format_mac(mac),
-        "mac_source": mac_source,
-        "request": api_payload(func, params),
-        "response": response,
-    }
-
-
-def require_yes(args: argparse.Namespace, message: str) -> None:
-    if not getattr(args, "yes", False):
-        raise CliError(f"{message}。如确认执行，请加 --yes")
-
-
-def require_danger(args: argparse.Namespace, message: str) -> None:
-    require_yes(args, message)
-    if not getattr(args, "danger", False):
-        raise CliError(f"{message}。如确认危险动作，请加 --danger")
-
-
-def require_extreme(args: argparse.Namespace, message: str) -> None:
-    require_danger(args, message)
-    if not getattr(args, "i_know_this_can_break_my_device", False):
-        raise CliError(
-            f"{message}。最后确认参数是 --i-know-this-can-break-my-device"
-        )
-
-
-def response_download_url(response: dict[str, Any]) -> str:
-    url = response.get("Dowloadurl") or response.get("Downloadurl") or response.get("downloadurl")
-    if not isinstance(url, str) or not url:
-        raise FHToolError(f"响应中没有 Dowloadurl: {response}")
-    return url
-
-
-def make_download_url(ip: str, value: str) -> str:
-    if value.startswith("http://") or value.startswith("https://"):
-        return value
-    return urljoin(f"http://{ip}:8080", value)
-
-
-def download_to_file(ip: str, url_value: str, output: Path, timeout: float) -> dict[str, Any]:
-    url = make_download_url(ip, url_value)
-    try:
-        response = requests.get(url, timeout=timeout, stream=True)
-    except requests.RequestException as exc:
-        raise FHToolError(f"下载失败 {url}: {exc}") from exc
-    if response.status_code != 200:
-        raise FHToolError(f"下载失败 {url}: HTTP {response.status_code}")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("wb") as file:
-        for chunk in response.iter_content(chunk_size=1024 * 128):
-            if chunk:
-                file.write(chunk)
-    return {
-        "url": url,
-        "output": str(output),
-        "bytes": output.stat().st_size,
-        "content_type": response.headers.get("Content-Type"),
-    }
+from .account import (
+    account_show,
+    read_secret_from_args,
+    set_su_runtime_password,
+    set_telnet_password,
+    set_telnet_username,
+    set_web_admin_password,
+)
+from .argparse_utils import parse_json_object, parse_kv, parse_ports
+from .backends.fh_tool import (
+    FH_TOOL_API_PATH,
+    FH_TOOL_UPLOAD_PATH,
+    api_payload,
+    call_method,
+    fh_tool_call,
+    response_download_url,
+)
+from .backup import (
+    create_backup,
+    restore_backup_archive,
+    restore_backup_to_device,
+    verify_backup,
+)
+from .backends.cfg_cmd import (
+    CfgCmdBackend,
+    cfg_path_risk,
+    cfg_read_risk,
+    cfg_set_with_verify,
+    cfg_snapshot,
+    diff_cfg_snapshots,
+    redact_cfg_value,
+    write_cfg_snapshot,
+)
+from .backends.local_vm import LocalVmShell
+from .backends.telnet import TelnetCredentials, TelnetShell
+from .client import download_to_file, tcp_open
+from .commands.web import (
+    command_web_ajax_get,
+    command_web_diagnostics_show,
+    command_web_login_check,
+    command_web_typed,
+    command_web_typed_write,
+)
+from .config_decrypt import decrypt_config_file
+from .config_store import (
+    config_path_from_args,
+    format_mac,
+    load_config,
+    normalize_ip,
+    normalize_mac,
+    resolve_ip,
+    resolve_mac,
+    save_config,
+)
+from .credentials import (
+    derive_credentials,
+    derive_hg5143f_telnet,
+)
+from .diagnostics import (
+    firewall_status,
+    ip_status,
+    ipv6_status,
+    pon_status,
+    vlan_list,
+    wan_list,
+)
+from .errors import CliError, FHToolError
+from .parser import (
+    DEFAULT_PORTS,
+    add_cfg_backend_options,
+    add_common_options,
+    add_danger,
+    add_extreme,
+    add_password_input_options,
+    add_telnet_options,
+    add_yes,
+    add_api_command as _add_parser_api_command,
+    parse_args as _parse_cli_args,
+)
+from .remote import (
+    autoupdate_status,
+    cloud_disable_cloudclt,
+    cloud_disable_smartswitch,
+    cloud_endpoints,
+    cloud_status,
+    remote_plan,
+    tr069_harden_periodic_inform,
+    tr069_randomize_connection_request,
+    tr069_status,
+    write_audit_report,
+)
+from .risk import require_danger, require_extreme, require_yes
+from .upload import (
+    redact_upload_prepare_result,
+    upload_file,
+    upload_file_info,
+    upload_workflow_plan,
+)
 
 
 def emit(data: Any, json_mode: bool) -> None:
@@ -509,6 +211,363 @@ def command_config_clear(args: argparse.Namespace) -> dict[str, Any]:
     return {"path": str(path), "removed": existed}
 
 
+def command_config_decrypt(args: argparse.Namespace) -> dict[str, Any]:
+    return decrypt_config_file(
+        Path(args.input).expanduser(),
+        attr_path=Path(args.attr).expanduser() if args.attr else None,
+        output_path=Path(args.output).expanduser() if args.output else None,
+        reveal_secrets=args.reveal_secrets,
+        key=args.key,
+        key_hex=args.key_hex,
+    )
+
+
+def command_backup_create(args: argparse.Namespace) -> dict[str, Any]:
+    return create_backup(
+        Path(args.source_root).expanduser(),
+        output_path=Path(args.output).expanduser() if args.output else None,
+        manifest_path=Path(args.manifest).expanduser() if args.manifest else None,
+    )
+
+
+def command_backup_verify(args: argparse.Namespace) -> dict[str, Any]:
+    return verify_backup(Path(args.path).expanduser())
+
+
+def command_restore_backup(args: argparse.Namespace) -> dict[str, Any]:
+    dry_run = not args.execute
+    if not dry_run:
+        require_extreme(args, "restore 会覆盖设备配置文件")
+    if args.target == "device":
+        return restore_backup_to_device(
+            Path(args.backup).expanduser(),
+            shell_runner=_telnet_shell_from_args(args).run,
+            dry_run=dry_run,
+            paths=args.path,
+            remote_tmpdir=args.remote_tmpdir,
+            chunk_size=args.chunk_size,
+        )
+    return restore_backup_archive(
+        Path(args.backup).expanduser(),
+        target_root=Path(args.target_root).expanduser() if args.target_root else None,
+        dry_run=dry_run,
+        paths=args.path,
+    )
+
+
+def command_credentials_derive(args: argparse.Namespace) -> dict[str, Any]:
+    ip, ip_source = resolve_ip(args)
+    mac, mac_source = resolve_mac(args, ip, required=True)
+    assert mac is not None
+    credentials = derive_credentials(mac, args.kind)
+    return {
+        "kind": args.kind,
+        "ip": ip,
+        "ip_source": ip_source,
+        "mac_source": mac_source,
+        "credentials": [
+            credential.render(reveal_secrets=args.reveal_secrets)
+            for credential in credentials
+        ],
+    }
+
+
+def _password_from_args(args: argparse.Namespace) -> str | None:
+    if getattr(args, "telnet_password_stdin", False):
+        return sys.stdin.readline().rstrip("\n")
+    if getattr(args, "password_stdin", False):
+        return sys.stdin.readline().rstrip("\n")
+    if getattr(args, "telnet_password", None) is not None:
+        return args.telnet_password
+    if hasattr(args, "telnet_password"):
+        return None
+    return getattr(args, "password", None)
+
+
+def _telnet_credentials_from_args(args: argparse.Namespace) -> TelnetCredentials:
+    ip, _ip_source = resolve_ip(args)
+    username = getattr(args, "username", None)
+    password = _password_from_args(args)
+
+    if getattr(args, "use_derived_credentials", False):
+        mac, _mac_source = resolve_mac(args, ip, required=True)
+        assert mac is not None
+        derived = derive_hg5143f_telnet(mac)
+        if username and username != derived.username and password is None:
+            raise CliError(
+                "--use-derived-credentials 只能为默认 HG5143F Telnet 账号补齐密码；"
+                "自定义 --username 需要同时提供密码"
+            )
+        username = username or derived.username
+        password = password or derived.password
+
+    return TelnetCredentials(
+        host=ip,
+        port=args.telnet_port,
+        username=username,
+        password=password,
+        timeout=args.timeout,
+    )
+
+
+def _cfg_backend_from_args(args: argparse.Namespace) -> CfgCmdBackend:
+    if getattr(args, "backend", "telnet") == "local-vm":
+        return CfgCmdBackend(
+            LocalVmShell(
+                Path(args.vm_root).expanduser(),
+                timeout=args.timeout,
+            ).run,
+            expensive_missing_paths=True,
+        )
+    return CfgCmdBackend(TelnetShell(_telnet_credentials_from_args(args)).run)
+
+
+def _telnet_shell_from_args(args: argparse.Namespace) -> TelnetShell:
+    return TelnetShell(_telnet_credentials_from_args(args))
+
+
+def _shell_runner_from_args(args: argparse.Namespace) -> Callable[[str], str]:
+    if getattr(args, "backend", "telnet") == "local-vm":
+        return LocalVmShell(
+            Path(args.vm_root).expanduser(),
+            timeout=args.timeout,
+        ).run
+    return _telnet_shell_from_args(args).run
+
+
+def command_cfg_get(args: argparse.Namespace) -> dict[str, Any]:
+    backend = _cfg_backend_from_args(args)
+    value = backend.get(args.path)
+    rendered_value, redacted = redact_cfg_value(
+        args.path,
+        value,
+        reveal_secrets=args.reveal_secrets,
+    )
+    return {
+        "path": args.path,
+        "value": rendered_value,
+        "risk": cfg_read_risk(args.path),
+        "redacted": redacted,
+    }
+
+
+def command_cfg_attr(args: argparse.Namespace) -> dict[str, Any]:
+    backend = _cfg_backend_from_args(args)
+    return {
+        "path": args.path,
+        "attr": backend.attr(args.path),
+        "risk": cfg_read_risk(args.path),
+    }
+
+
+def command_cfg_set(args: argparse.Namespace) -> dict[str, Any]:
+    risk = cfg_path_risk(args.path)
+    if risk == "danger":
+        require_danger(args, "cfg set 会修改高风险配置路径")
+    else:
+        require_yes(args, "cfg set 会修改设备配置")
+    if not args.backup_confirmed:
+        raise CliError("cfg set 前需要先完成备份；确认已有备份请加 --backup-confirmed")
+    backend = _cfg_backend_from_args(args)
+    return cfg_set_with_verify(backend, args.path, args.value)
+
+
+def command_cfg_snapshot(args: argparse.Namespace) -> dict[str, Any]:
+    backend = _cfg_backend_from_args(args)
+    snapshot = cfg_snapshot(backend, args.path)
+    if not args.reveal_secrets:
+        snapshot["values"] = {
+            path: redact_cfg_value(path, value, reveal_secrets=False)[0]
+            for path, value in snapshot["values"].items()
+        }
+        snapshot["redacted"] = True
+    else:
+        snapshot["redacted"] = False
+    return write_cfg_snapshot(
+        snapshot,
+        Path(args.output).expanduser() if args.output else None,
+    )
+
+
+def command_cfg_diff(args: argparse.Namespace) -> dict[str, Any]:
+    return diff_cfg_snapshots(
+        Path(args.before).expanduser(),
+        Path(args.after).expanduser(),
+    )
+
+
+def _require_backup_confirmed(args: argparse.Namespace, message: str) -> None:
+    if not args.backup_confirmed:
+        raise CliError(f"{message} 前需要先完成备份；确认已有备份请加 --backup-confirmed")
+
+
+def command_account_show(args: argparse.Namespace) -> dict[str, Any]:
+    return account_show(
+        _cfg_backend_from_args(args),
+        reveal_secrets=args.reveal_secrets,
+    )
+
+
+def command_account_set_web_admin_password(args: argparse.Namespace) -> dict[str, Any]:
+    require_yes(args, "set-web-admin-password 会修改 Web superadmin password")
+    _require_backup_confirmed(args, "set-web-admin-password")
+    secret = read_secret_from_args(args)
+    result = set_web_admin_password(_cfg_backend_from_args(args), secret.password)
+    result["generated"] = secret.generated
+    return result
+
+
+def command_account_set_telnet_password(args: argparse.Namespace) -> dict[str, Any]:
+    require_yes(args, "set-telnet-password 会修改 Telnet login password")
+    _require_backup_confirmed(args, "set-telnet-password")
+    secret = read_secret_from_args(args)
+    result = set_telnet_password(_cfg_backend_from_args(args), secret.password)
+    result["generated"] = secret.generated
+    return result
+
+
+def command_account_set_telnet_username(args: argparse.Namespace) -> dict[str, Any]:
+    require_danger(args, "set-telnet-username 会修改 Telnet login username")
+    _require_backup_confirmed(args, "set-telnet-username")
+    return set_telnet_username(_cfg_backend_from_args(args), args.name)
+
+
+def command_account_set_su_runtime_password(args: argparse.Namespace) -> dict[str, Any]:
+    require_danger(args, "set-su-runtime-password 会覆写 runtime su password")
+    secret = read_secret_from_args(args)
+    result = set_su_runtime_password(_telnet_shell_from_args(args).run, secret.password)
+    result["generated"] = secret.generated
+    return result
+
+
+def command_autoupdate_status(args: argparse.Namespace) -> dict[str, Any]:
+    return autoupdate_status(
+        _cfg_backend_from_args(args),
+        reveal_secrets=args.reveal_secrets,
+    )
+
+
+def command_autoupdate_audit(args: argparse.Namespace) -> dict[str, Any]:
+    report = command_autoupdate_status(args)
+    report["plan"] = remote_plan("autoupdate")
+    return write_audit_report(
+        report,
+        Path(args.output).expanduser() if args.output else None,
+    )
+
+
+def command_autoupdate_plan(args: argparse.Namespace) -> dict[str, Any]:
+    return remote_plan("autoupdate")
+
+
+def command_tr069_status(args: argparse.Namespace) -> dict[str, Any]:
+    shell = _telnet_shell_from_args(args)
+    return tr069_status(
+        _cfg_backend_from_args(args),
+        shell.run,
+        reveal_secrets=args.reveal_secrets,
+    )
+
+
+def command_tr069_audit(args: argparse.Namespace) -> dict[str, Any]:
+    report = command_tr069_status(args)
+    report["plan"] = remote_plan("tr069")
+    return write_audit_report(
+        report,
+        Path(args.output).expanduser() if args.output else None,
+    )
+
+
+def command_tr069_plan(args: argparse.Namespace) -> dict[str, Any]:
+    return remote_plan("tr069")
+
+
+def command_tr069_harden(args: argparse.Namespace) -> dict[str, Any]:
+    require_danger(args, "tr069 harden 会修改远程管理配置")
+    _require_backup_confirmed(args, "tr069 harden")
+    result: dict[str, Any] = {"actions": []}
+    if args.periodic_inform:
+        result["actions"].append(
+            tr069_harden_periodic_inform(
+                _cfg_backend_from_args(args),
+                args.periodic_inform,
+            )
+        )
+    if not result["actions"]:
+        raise CliError("tr069 harden 至少需要一个 harden 选项")
+    return result
+
+
+def command_tr069_randomize_connection_request(args: argparse.Namespace) -> dict[str, Any]:
+    require_danger(args, "tr069 randomize-connection-request 会修改远程管理凭据")
+    _require_backup_confirmed(args, "tr069 randomize-connection-request")
+    return tr069_randomize_connection_request(_cfg_backend_from_args(args))
+
+
+def command_cloud_status(args: argparse.Namespace) -> dict[str, Any]:
+    shell = _telnet_shell_from_args(args)
+    return cloud_status(
+        _cfg_backend_from_args(args),
+        shell.run,
+        reveal_secrets=args.reveal_secrets,
+    )
+
+
+def command_cloud_endpoints(args: argparse.Namespace) -> dict[str, Any]:
+    return cloud_endpoints(
+        _cfg_backend_from_args(args),
+        reveal_secrets=args.reveal_secrets,
+    )
+
+
+def command_cloud_audit(args: argparse.Namespace) -> dict[str, Any]:
+    report = command_cloud_status(args)
+    report["plan"] = remote_plan("cloud")
+    return write_audit_report(
+        report,
+        Path(args.output).expanduser() if args.output else None,
+    )
+
+
+def command_cloud_plan(args: argparse.Namespace) -> dict[str, Any]:
+    return remote_plan("cloud")
+
+
+def command_cloud_disable_cloudclt(args: argparse.Namespace) -> dict[str, Any]:
+    require_danger(args, "cloud disable-cloudclt 会停止/禁用 cloud client")
+    return cloud_disable_cloudclt(_telnet_shell_from_args(args).run)
+
+
+def command_cloud_disable_smartswitch(args: argparse.Namespace) -> dict[str, Any]:
+    require_danger(args, "cloud disable-smartswitch 会修改 SmartSwitch")
+    _require_backup_confirmed(args, "cloud disable-smartswitch")
+    return cloud_disable_smartswitch(_cfg_backend_from_args(args))
+
+
+def command_pon_status(args: argparse.Namespace) -> dict[str, Any]:
+    return pon_status(_cfg_backend_from_args(args), reveal_secrets=args.reveal_secrets)
+
+
+def command_wan_list(args: argparse.Namespace) -> dict[str, Any]:
+    return wan_list(_cfg_backend_from_args(args), reveal_secrets=args.reveal_secrets)
+
+
+def command_vlan_list(args: argparse.Namespace) -> dict[str, Any]:
+    return vlan_list(_cfg_backend_from_args(args), reveal_secrets=args.reveal_secrets)
+
+
+def command_ip_status(args: argparse.Namespace) -> dict[str, Any]:
+    return ip_status(_shell_runner_from_args(args))
+
+
+def command_firewall_status(args: argparse.Namespace) -> dict[str, Any]:
+    return firewall_status(_cfg_backend_from_args(args), reveal_secrets=args.reveal_secrets)
+
+
+def command_ipv6_status(args: argparse.Namespace) -> dict[str, Any]:
+    return ipv6_status(_cfg_backend_from_args(args), reveal_secrets=args.reveal_secrets)
+
+
 def command_simple(func: str, params: dict[str, Any] | None = None) -> Callable[[argparse.Namespace], dict[str, Any]]:
     def handler(args: argparse.Namespace) -> dict[str, Any]:
         return call_method(args, func, params)
@@ -581,7 +640,18 @@ def command_restore_default_settings(args: argparse.Namespace) -> dict[str, Any]
 
 
 def command_upload_prepare(args: argparse.Namespace) -> dict[str, Any]:
-    return call_method(args, "UploadPrepare")
+    return redact_upload_prepare_result(
+        call_method(args, "UploadPrepare"),
+        reveal_secrets=args.reveal_secrets,
+    )
+
+
+def command_upload_plan(args: argparse.Namespace) -> dict[str, Any]:
+    return upload_workflow_plan(
+        args.action,
+        file_info=upload_file_info(Path(args.file).expanduser()) if args.file else None,
+        uploaded=False,
+    )
 
 
 def command_reboot(args: argparse.Namespace) -> dict[str, Any]:
@@ -652,74 +722,90 @@ def command_download_url(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_upload(args: argparse.Namespace) -> dict[str, Any]:
-    require_danger(args, "upload 会写入 firmware/preconfig staging path")
+    dry_run = args.dry_run
+    if not dry_run:
+        require_extreme(args, "upload 会写入 firmware/preconfig staging path")
     ip, ip_source = resolve_ip(args)
     file_path = Path(args.file).expanduser()
-    if not file_path.is_file():
-        raise CliError(f"上传文件不存在: {file_path}")
-    url = f"http://{ip}:8080{FH_TOOL_UPLOAD_PATH}?action={args.action}"
-    try:
-        with file_path.open("rb") as file:
-            response = requests.post(
-                url,
-                headers={"fh_upgrade_api_token": args.sessionid},
-                files={"file": (file_path.name, file)},
-                timeout=args.timeout,
-                allow_redirects=False,
-            )
-    except requests.RequestException as exc:
-        raise FHToolError(f"上传失败 {url}: {exc}") from exc
+    result = upload_file(
+        ip=ip,
+        action=args.action,
+        file_path=file_path,
+        sessionid=args.sessionid,
+        timeout=args.timeout,
+        dry_run=dry_run,
+    )
+    result["ip_source"] = ip_source
+    return result
+
+
+def _command_handlers() -> dict[str, Any]:
     return {
-        "ip": ip,
-        "ip_source": ip_source,
-        "url": url,
-        "status_code": response.status_code,
-        "text": response.text[:1000],
+        "command_probe": command_probe,
+        "command_ports": command_ports,
+        "command_config_decrypt": command_config_decrypt,
+        "command_backup_create": command_backup_create,
+        "command_backup_verify": command_backup_verify,
+        "command_restore_backup": command_restore_backup,
+        "command_credentials_derive": command_credentials_derive,
+        "command_cfg_get": command_cfg_get,
+        "command_cfg_set": command_cfg_set,
+        "command_cfg_attr": command_cfg_attr,
+        "command_cfg_snapshot": command_cfg_snapshot,
+        "command_cfg_diff": command_cfg_diff,
+        "command_account_show": command_account_show,
+        "command_account_set_web_admin_password": command_account_set_web_admin_password,
+        "command_account_set_telnet_password": command_account_set_telnet_password,
+        "command_account_set_telnet_username": command_account_set_telnet_username,
+        "command_account_set_su_runtime_password": command_account_set_su_runtime_password,
+        "command_autoupdate_status": command_autoupdate_status,
+        "command_autoupdate_audit": command_autoupdate_audit,
+        "command_autoupdate_plan": command_autoupdate_plan,
+        "command_tr069_status": command_tr069_status,
+        "command_tr069_audit": command_tr069_audit,
+        "command_tr069_plan": command_tr069_plan,
+        "command_tr069_harden": command_tr069_harden,
+        "command_tr069_randomize_connection_request": command_tr069_randomize_connection_request,
+        "command_cloud_status": command_cloud_status,
+        "command_cloud_endpoints": command_cloud_endpoints,
+        "command_cloud_audit": command_cloud_audit,
+        "command_cloud_plan": command_cloud_plan,
+        "command_cloud_disable_cloudclt": command_cloud_disable_cloudclt,
+        "command_cloud_disable_smartswitch": command_cloud_disable_smartswitch,
+        "command_pon_status": command_pon_status,
+        "command_wan_list": command_wan_list,
+        "command_vlan_list": command_vlan_list,
+        "command_ip_status": command_ip_status,
+        "command_firewall_status": command_firewall_status,
+        "command_ipv6_status": command_ipv6_status,
+        "command_config_show": command_config_show,
+        "command_config_set": command_config_set,
+        "command_config_clear": command_config_clear,
+        "command_log_download": command_log_download,
+        "command_simple": command_simple,
+        "command_set_result": command_set_result,
+        "command_set_port_mirror": command_set_port_mirror,
+        "command_set_reg_account": command_set_reg_account,
+        "command_set_pwd_reg_password": command_set_pwd_reg_password,
+        "command_download_file": command_download_file,
+        "command_restore_default_settings": command_restore_default_settings,
+        "command_upload_prepare": command_upload_prepare,
+        "command_upload_plan": command_upload_plan,
+        "command_reboot": command_reboot,
+        "command_set_preconfig": command_set_preconfig,
+        "command_telnet_enable": command_telnet_enable,
+        "command_telnet_disable": command_telnet_disable,
+        "command_set_fh_debug_log": command_set_fh_debug_log,
+        "command_close_fh_debug_log": command_close_fh_debug_log,
+        "command_open_fh_debug_log": command_open_fh_debug_log,
+        "command_raw_call": command_raw_call,
+        "command_download_url": command_download_url,
+        "command_upload": command_upload,
     }
 
 
-def add_common_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--ip", type=normalize_ip, help="网关 IPv4 地址")
-    parser.add_argument(
-        "--mac",
-        help="网关 MAC，支持 AABBCCDDEEFF / AA:BB:CC:DD:EE:FF / AA-BB-CC-DD-EE-FF",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=5.0,
-        help="HTTP/TCP timeout 秒数，默认 5",
-    )
-    parser.add_argument(
-        "--config",
-        default=str(DEFAULT_CONFIG_PATH),
-        help=f"配置文件路径，默认 {DEFAULT_CONFIG_PATH}",
-    )
-    parser.add_argument(
-        "--ask-mac",
-        action="store_true",
-        help="无法自动获取 MAC 时交互式询问；--json 下不会询问",
-    )
-    parser.add_argument("--json", action="store_true", help="输出 machine-readable JSON")
-
-
-def add_yes(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--yes", action="store_true", help="确认执行会改变设备状态的动作")
-
-
-def add_danger(parser: argparse.ArgumentParser) -> None:
-    add_yes(parser)
-    parser.add_argument("--danger", action="store_true", help="确认执行高风险动作")
-
-
-def add_extreme(parser: argparse.ArgumentParser) -> None:
-    add_danger(parser)
-    parser.add_argument(
-        "--i-know-this-can-break-my-device",
-        dest="i_know_this_can_break_my_device",
-        action="store_true",
-        help="确认该动作可能导致设备断网、重启或恢复出厂",
-    )
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return _parse_cli_args(argv, handlers=_command_handlers())
 
 
 def add_api_command(
@@ -730,182 +816,14 @@ def add_api_command(
     aliases: list[str] | None = None,
     help_text: str,
 ) -> None:
-    parser = subparsers.add_parser(name, aliases=aliases or [], help=help_text)
-    add_common_options(parser)
-    parser.set_defaults(handler=command_simple(func))
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog=Path(sys.argv[0]).name or "fh-tool",
-        description="本地管理 FiberHome /fh_tool 接口的 CLI。",
-        epilog="使用 COMMAND -h 查看具体命令参数。",
+    _add_parser_api_command(
+        subparsers,
+        name,
+        func,
+        aliases=aliases,
+        help_text=help_text,
+        handlers=_command_handlers(),
     )
-    subparsers = parser.add_subparsers(
-        dest="command",
-        required=True,
-        metavar="COMMAND",
-        title="commands",
-    )
-
-    probe = subparsers.add_parser("probe", help="低风险探测 fh_tool 是否可用")
-    add_common_options(probe)
-    probe.add_argument("--ports", default=DEFAULT_PORTS, help=f"逗号分隔 port，默认 {DEFAULT_PORTS}")
-    probe.set_defaults(handler=command_probe)
-
-    ports = subparsers.add_parser("ports", help="检查 TCP port 是否打开")
-    add_common_options(ports)
-    ports.add_argument("--ports", default=DEFAULT_PORTS, help=f"逗号分隔 port，默认 {DEFAULT_PORTS}")
-    ports.set_defaults(handler=command_ports)
-
-    config = subparsers.add_parser("config", help="管理本机 CLI 配置")
-    config_subparsers = config.add_subparsers(
-        dest="config_command",
-        required=True,
-        metavar="SUBCOMMAND",
-        title="config commands",
-    )
-    config_show = config_subparsers.add_parser("show", help="显示配置")
-    config_show.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
-    config_show.add_argument("--json", action="store_true")
-    config_show.set_defaults(handler=command_config_show)
-    config_set = config_subparsers.add_parser("set", help="保存默认 IP/MAC")
-    config_set.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
-    config_set.add_argument("--json", action="store_true")
-    config_set.add_argument("--ip", type=normalize_ip)
-    config_set.add_argument("--mac")
-    config_set.set_defaults(handler=command_config_set)
-    config_clear = config_subparsers.add_parser("clear", help="删除配置文件")
-    config_clear.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
-    config_clear.add_argument("--json", action="store_true")
-    config_clear.set_defaults(handler=command_config_clear)
-
-    add_api_command(subparsers, "get-result", "GetResult", help_text="读取 operator registration result")
-    add_api_command(subparsers, "get-port-mirror", "GetPortMirror", help_text="读取 port mirror 配置")
-
-    log_download = subparsers.add_parser("log-download", help="调用 LogDownload，可选下载 tar")
-    add_common_options(log_download)
-    log_download.add_argument("--output", help="保存返回的 tool_download 文件")
-    log_download.set_defaults(handler=command_log_download)
-
-    add_api_command(subparsers, "dev-info", "GetDevInfo", aliases=["info"], help_text="读取设备基础信息")
-    add_api_command(subparsers, "admin-account", "GetAdminAccount", help_text="读取 telecomadmin account")
-    add_api_command(subparsers, "reg-account", "GetRegAccount", help_text="读取 registration account")
-    add_api_command(subparsers, "pwd-reg-password", "GetPwdRegPassword", help_text="读取 CMCC registration password")
-    add_api_command(subparsers, "get-preconfig", "GetPreconfig", help_text="读取 preconfig 列表")
-    add_api_command(subparsers, "pppoe-account", "GetPppoeAccount", help_text="读取 PPPoE account")
-
-    set_result = subparsers.add_parser("set-result", help="写入 registration result")
-    add_common_options(set_result)
-    add_yes(set_result)
-    set_result.add_argument("--result", required=True)
-    set_result.set_defaults(handler=command_set_result)
-
-    set_port_mirror = subparsers.add_parser("set-port-mirror", help="写入 port mirror 配置")
-    add_common_options(set_port_mirror)
-    add_yes(set_port_mirror)
-    set_port_mirror.add_argument("--enable", required=True)
-    set_port_mirror.add_argument("--direction", required=True)
-    set_port_mirror.add_argument("--srcport", required=True)
-    set_port_mirror.add_argument("--dstport", required=True)
-    set_port_mirror.set_defaults(handler=command_set_port_mirror)
-
-    set_reg_account = subparsers.add_parser("set-reg-account", help="写入 registration account")
-    add_common_options(set_reg_account)
-    add_yes(set_reg_account)
-    set_reg_account.add_argument("--regname", required=True)
-    set_reg_account.add_argument("--regpwd", required=True)
-    set_reg_account.set_defaults(handler=command_set_reg_account)
-
-    set_pwd_reg_password = subparsers.add_parser("set-pwd-reg-password", help="写入 CMCC registration password")
-    add_common_options(set_pwd_reg_password)
-    add_yes(set_pwd_reg_password)
-    set_pwd_reg_password.add_argument("--password", required=True)
-    set_pwd_reg_password.set_defaults(handler=command_set_pwd_reg_password)
-
-    download_file = subparsers.add_parser("download-file", help="调用 DownloadFile 并保存返回文件")
-    add_common_options(download_file)
-    add_yes(download_file)
-    download_file.add_argument("--file-name", required=True)
-    download_file.add_argument("--output", help="本地保存路径；默认使用返回文件名")
-    download_file.set_defaults(handler=command_download_file)
-
-    restore = subparsers.add_parser("restore-default-settings", help="恢复出厂设置")
-    add_common_options(restore)
-    add_extreme(restore)
-    restore.set_defaults(handler=command_restore_default_settings)
-
-    upload_prepare = subparsers.add_parser("upload-prepare", help="调用 UploadPrepare 获取 sessionid")
-    add_common_options(upload_prepare)
-    upload_prepare.set_defaults(handler=command_upload_prepare)
-
-    reboot = subparsers.add_parser("reboot", help="重启设备")
-    add_common_options(reboot)
-    add_extreme(reboot)
-    reboot.set_defaults(handler=command_reboot)
-
-    set_preconfig = subparsers.add_parser("set-preconfig", help="切换 preconfig")
-    add_common_options(set_preconfig)
-    add_danger(set_preconfig)
-    set_preconfig.add_argument("--fullname", required=True)
-    set_preconfig.set_defaults(handler=command_set_preconfig)
-
-    telnet = subparsers.add_parser("telnet", help="管理 runtime Telnet")
-    telnet_subparsers = telnet.add_subparsers(
-        dest="telnet_command",
-        required=True,
-        metavar="SUBCOMMAND",
-        title="telnet commands",
-    )
-    telnet_enable = telnet_subparsers.add_parser("enable", help="调用 TelnetEnable=1")
-    add_common_options(telnet_enable)
-    add_yes(telnet_enable)
-    telnet_enable.set_defaults(handler=command_telnet_enable)
-    telnet_disable = telnet_subparsers.add_parser("disable", help="调用 TelnetEnable=0")
-    add_common_options(telnet_disable)
-    add_danger(telnet_disable)
-    telnet_disable.set_defaults(handler=command_telnet_disable)
-
-    set_fh_debug_log = subparsers.add_parser("set-fh-debug-log", help="调用 SetFHDebugLog")
-    add_common_options(set_fh_debug_log)
-    add_danger(set_fh_debug_log)
-    set_fh_debug_log.add_argument("--module", required=True)
-    set_fh_debug_log.add_argument("--data", required=True)
-    set_fh_debug_log.set_defaults(handler=command_set_fh_debug_log)
-
-    close_fh_debug_log = subparsers.add_parser("close-fh-debug-log", help="关闭 FH debug log")
-    add_common_options(close_fh_debug_log)
-    add_yes(close_fh_debug_log)
-    close_fh_debug_log.set_defaults(handler=command_close_fh_debug_log)
-
-    open_fh_debug_log = subparsers.add_parser("open-fh-debug-log", help="开启 FH debug log")
-    add_common_options(open_fh_debug_log)
-    add_yes(open_fh_debug_log)
-    open_fh_debug_log.set_defaults(handler=command_open_fh_debug_log)
-
-    raw_call = subparsers.add_parser("call", help="raw fh_tool/api call")
-    add_common_options(raw_call)
-    raw_call.add_argument("--func", required=True)
-    raw_call.add_argument("--param", action="append", default=[], help="k=v，可重复")
-    raw_call.add_argument("--json-payload", help="额外 JSON object 参数")
-    raw_call.add_argument("--allow-risky", action="store_true", help="允许 raw call 调用 risky func")
-    raw_call.set_defaults(handler=command_raw_call)
-
-    download_url = subparsers.add_parser("download-url", help="下载 /fh_tool/tool_download 返回文件")
-    add_common_options(download_url)
-    download_url.add_argument("--url", required=True)
-    download_url.add_argument("--output", required=True)
-    download_url.set_defaults(handler=command_download_url)
-
-    upload = subparsers.add_parser("upload", help="调用 /fh_tool/upload")
-    add_common_options(upload)
-    add_danger(upload)
-    upload.add_argument("--action", choices=["upgradeimage", "preconfig"], required=True)
-    upload.add_argument("--file", required=True)
-    upload.add_argument("--sessionid", required=True)
-    upload.set_defaults(handler=command_upload)
-
-    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
