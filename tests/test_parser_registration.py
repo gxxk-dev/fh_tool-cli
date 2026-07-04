@@ -76,6 +76,20 @@ class ParserRegistrationTests(unittest.TestCase):
         self.assertTrue(args.yes)
         self.assertTrue(args.danger)
 
+    def test_new_web_subcommands_bind_handlers(self) -> None:
+        cases = [
+            ["web", "discover", "live", "--ip", "192.168.1.1"],
+            ["web", "discover", "static", "--root", "/tmp/rootfs"],
+            ["web", "discover", "merge", "--input", "/tmp/live.json", "--input", "/tmp/static.json"],
+            ["web", "ajax", "post", "set_fake", "--param", "Enable=1", "--ip", "192.168.1.1"],
+            ["web", "ajax", "replay", "--catalog", "/tmp/catalog.json", "--method", "set_fake", "--param", "Enable=1"],
+        ]
+
+        for argv in cases:
+            with self.subTest(argv=argv):
+                args = cli.parse_args(argv)
+                self.assertTrue(callable(args.handler))
+
 
 if __name__ == "__main__":
     unittest.main()

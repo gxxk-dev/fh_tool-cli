@@ -210,6 +210,33 @@ class WebAjaxTests(unittest.TestCase):
         self.assertEqual(post_call[2]["data"]["sessionid"], "sid-explicit")
         self.assertEqual(result["raw"]["response"]["token"], "[REDACTED]")
 
+    def test_generic_post_dry_run_does_not_send_request(self) -> None:
+        session = FakeSession()
+        client = WebAjaxClient("http://192.168.1.1/", session=session, sessionid="sid-explicit")
+
+        result = client.raw_post(
+            "set_fake",
+            {"Enable": "1", "Password": "secret"},
+            dry_run=True,
+        )
+
+        self.assertEqual(result["status"], "dry-run")
+        self.assertEqual(result["request"]["Password"], "[REDACTED]")
+        self.assertEqual(result["request"]["sessionid"], "[REDACTED]")
+        self.assertEqual(session.calls, [])
+
+    def test_generic_post_execute_injects_session_and_redacts_response(self) -> None:
+        session = FakeSession()
+        client = WebAjaxClient("http://192.168.1.1/", session=session, sessionid="sid-explicit")
+
+        result = client.raw_post("setVlanBind", {"IfName": "eth1"}, dry_run=False)
+
+        self.assertEqual(result["status"], "executed")
+        post_call = [call for call in session.calls if call[0] == "POST"][-1]
+        self.assertEqual(post_call[2]["data"]["ajaxmethod"], "setVlanBind")
+        self.assertEqual(post_call[2]["data"]["sessionid"], "sid-explicit")
+        self.assertEqual(result["raw"]["response"]["token"], "[REDACTED]")
+
     def test_sessionid_is_captured_and_added_to_later_requests(self) -> None:
         session = FakeSession()
         client = WebAjaxClient("http://192.168.1.1/", session=session)
@@ -238,6 +265,15 @@ class WebAjaxTests(unittest.TestCase):
         self.assertEqual(posted["sessionid"], "sid-operator")
         self.assertNotEqual(posted["loginpd"], "plain-secret")
         self.assertNotIn("plain-secret", str(result))
+
+    def test_auto_login_result_does_not_leak_plain_password(self) -> None:
+        session = FakeSession()
+        client = WebAjaxClient("http://192.168.1.1/", session=session)
+
+        result = client.login("useradmin", "auto-secret")
+
+        self.assertNotIn("auto-secret", str(result))
+        self.assertNotIn("auto-secret", str(session.calls))
 
     def test_web_login_key_matches_vendor_slice(self) -> None:
         self.assertEqual(

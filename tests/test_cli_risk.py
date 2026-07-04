@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from fh_tool_cli.cli import parse_args
 from fh_tool_cli.errors import CliError
@@ -140,7 +141,7 @@ class CliRiskTests(unittest.TestCase):
         with self.assertRaisesRegex(CliError, "--backup-confirmed"):
             args.handler(args)
 
-    def test_web_login_requires_username_and_password_together(self) -> None:
+    def test_web_login_username_uses_auto_password_source(self) -> None:
         args = parse_args(
             [
                 "web",
@@ -154,8 +155,28 @@ class CliRiskTests(unittest.TestCase):
             ]
         )
 
-        with self.assertRaisesRegex(CliError, "--username"):
-            args.handler(args)
+        class FakeClient:
+            sessionid = None
+
+            def login(self, username: str, password: str, *, port: str) -> dict[str, object]:
+                return {
+                    "ok": True,
+                    "username": username,
+                    "sessionid_present": True,
+                    "login_result": 0,
+                }
+
+            def ajax_get(self, method: str) -> dict[str, object]:
+                return {"method": method, "ok": True}
+
+        with (
+            patch("fh_tool_cli.commands.web._web_client_from_args", return_value=FakeClient()),
+            patch("fh_tool_cli.commands.web._web_password_from_args", return_value=("auto-secret", "admin-account", [])),
+        ):
+            result = args.handler(args)
+
+        self.assertEqual(result["method"], "get_base_info")
+        self.assertNotIn("auto-secret", str(result))
 
     def test_diagnostics_accept_local_vm_backend_options(self) -> None:
         args = parse_args(

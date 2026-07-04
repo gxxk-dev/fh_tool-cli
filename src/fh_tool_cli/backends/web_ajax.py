@@ -179,6 +179,50 @@ class WebAjaxClient:
             raise FHToolError(f"Web AJAX POST failed {url}: {exc}") from exc
         return self._response_result("POST", url, method, response)
 
+    def raw_post(
+        self,
+        method: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        request_payload = dict(payload or {})
+        if self.sessionid:
+            request_payload.setdefault("sessionid", self.sessionid)
+        redacted_request = _redact_web_payload(
+            request_payload,
+            reveal_secrets=self.reveal_secrets,
+        )
+        base = {
+            "method": method,
+            "http_method": "POST",
+            "status": "dry-run" if dry_run else "executed",
+            "status_code": None,
+            "ok": True,
+            "risk": "danger",
+            "sessionid_present": bool(self.sessionid),
+            "request": redacted_request,
+            "raw": None,
+            "side_effects": {
+                "post": not dry_run,
+                "reboot": False,
+                "restore": False,
+                "factory_reset": False,
+            },
+        }
+        if dry_run:
+            return base
+
+        raw = self.ajax_post(method, payload)
+        return {
+            **base,
+            "status_code": raw["status_code"],
+            "ok": raw["ok"],
+            "sessionid_present": bool(self.sessionid),
+            "raw": raw,
+            "response": raw.get("response"),
+        }
+
     def typed(self, group: str, action: str) -> dict[str, Any]:
         try:
             method = WEB_TYPED_METHODS[(group, action)]
@@ -331,3 +375,7 @@ def _redact_web_payload(value: Any, *, reveal_secrets: bool) -> Any:
     if isinstance(value, list):
         return [_redact_web_payload(item, reveal_secrets=False) for item in value]
     return value
+
+
+def redact_web_payload(value: Any, *, reveal_secrets: bool = False) -> Any:
+    return _redact_web_payload(value, reveal_secrets=reveal_secrets)
