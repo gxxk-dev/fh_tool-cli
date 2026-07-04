@@ -77,6 +77,15 @@ fh-tool pppoe-account
 fh-tool pwd-reg-password
 ```
 
+只读派生 HG5143F 管理面凭据候选，默认脱敏：
+
+```bash
+fh-tool credentials derive --mac AABBCCDDEEFF
+fh-tool credentials derive --kind hg5143f-telnet --mac AABBCCDDEEFF
+```
+
+当前只实现本地验证过的 HG5143F 管理面规则：Telnet 登录候选和 runtime `su root` 候选。Web superadmin、LOID/registration、TR-069/ACS 是配置层存储值，工具通过 `/fh_tool/api`、`cfg_cmd` 或离线配置解密读取并默认脱敏，不把它们当成公式猜测。Wi-Fi SSID/PSK 不属于当前 `fh_tool-cli` 范围。
+
 打开 runtime Telnet：
 
 ```bash
@@ -88,6 +97,114 @@ fh-tool telnet enable --yes
 ```bash
 fh-tool ports --ports 23,80,443,8080
 ```
+
+## 本地 VM 测试环境
+
+如果已经在 `/mnt/dev-cold/HG5143F-ONU-vm` 启动本地 userspace VM，可直接用它测试 `cfg_cmd` 和 Web AJAX，不需要碰真实网关：
+
+```bash
+/mnt/dev-cold/HG5143F-ONU-vm/bin/start-fhapi-proot
+/mnt/dev-cold/HG5143F-ONU-vm/bin/start-http-stack-proot
+
+fh-tool cfg get InternetGatewayDevice.DeviceInfo.Manufacturer --backend local-vm
+fh-tool cfg snapshot --backend local-vm --path InternetGatewayDevice.DeviceInfo.Manufacturer --path InternetGatewayDevice.DeviceInfo.ModelName
+fh-tool web login-check --ip 127.0.0.1 --web-port 8080
+fh-tool web ajax get get_factory_mode --ip 127.0.0.1 --web-port 8080
+fh-tool web wan list --ip 127.0.0.1 --web-port 8080
+fh-tool web port-mapping list --ip 127.0.0.1 --web-port 8080
+fh-tool web vlanbind show --ip 127.0.0.1 --web-port 8080
+fh-tool web diagnostics show --ip 127.0.0.1 --web-port 8080
+fh-tool pon status --backend local-vm
+fh-tool wan list --backend local-vm
+```
+
+`local-vm` 只是在本机 proot VM 内执行厂商 `cfg_cmd`。`--vm-root` 必须指向 VM 工作区目录，也就是包含 `bin/proot-shell` 和 `rootfs-vm/fhrom/bin/cfg_cmd` 的目录；默认是 `/mnt/dev-cold/HG5143F-ONU-vm`。不要把它指到里面的 `rootfs-vm/`。
+
+Web AJAX 读取命令只读。需要复用已有 Web session 时加 `--sessionid`；需要显式登录时使用 `--username` 配合 `--password-stdin` 或 `--password`。sessionid、密码、LOID、PPPoE 等敏感字段默认会脱敏；只有显式加 `--reveal-secrets` 才输出明文。
+
+Web AJAX 写接口默认只做 dry-run。执行 POST 需要先完成备份，并显式加 `--execute --backup-confirmed --yes --danger`：
+
+```bash
+fh-tool web port-mapping set --operation add --wan-index 1 --wan-session-index 1 --wan-iporppp ppp --external-port 8080 --protocol tcp --internal-client 192.168.1.2 --internal-port 80
+fh-tool web vlanbind set --operation add --if-name eth1 --user-vlan 100 --wan-vlan 100
+fh-tool web firewall set --enable 1 --level medium --dos-enable 1 --ipv6-enable 1 --execute --backup-confirmed --yes --danger
+fh-tool web services set --service telnet --enabled 0 --execute --backup-confirmed --yes --danger
+```
+
+常规 Web 写接口优先使用 typed 参数。`--json-payload` 和可重复的 `--param k=v` 仍保留为固件差异逃生口，合并顺序是 typed 参数、JSON、最后 `--param` 覆盖。
+
+Telnet/cfg/诊断命令默认不会自动套用派生凭据。如果设备仍是 HG5143F 默认 Telnet 规则，并且已提供或保存 MAC，可以显式加 `--use-derived-credentials` 作为 fallback：
+
+```bash
+fh-tool cfg get InternetGatewayDevice.DeviceInfo.Manufacturer --use-derived-credentials
+fh-tool wan list --use-derived-credentials
+```
+
+诊断命令保持只读；`ip status` 这类依赖 VM/userspace 工具的命令会分别标记每个 probe 的 `ok/output/error`，工具缺失时输出 `partial_failure=true`，不会吞掉其它已成功字段。
+
+本地 VM 集成测试默认会跳过；需要显式指定 VM 目录才会运行：
+
+```bash
+uv run python -m unittest discover -s tests
+FH_TOOL_CLI_VM_ROOT=/mnt/dev-cold/HG5143F-ONU-vm uv run python -m unittest tests.test_local_vm_integration
+```
+
+## 备份与安全回滚
+
+创建和验证备份：
+
+```bash
+fh-tool backup --source-root / --output backup.tgz
+fh-tool backup verify backup.tgz
+```
+
+`restore` 默认只做 dry-run：解析 backup、验证 manifest/sha256，并显示将恢复的文件、目标路径和风险等级，不写入任何文件。
+
+```bash
+fh-tool restore backup.tgz --dry-run
+fh-tool restore backup.tgz --dry-run --path /fhconf/usrconfig_conf
+```
+
+执行恢复必须显式指定本地目标根目录，并通过 extreme 风险确认：
+
+```bash
+fh-tool restore backup.tgz \
+  --target-root /tmp/fh-tool-restore-root \
+  --execute \
+  --yes --danger --i-know-this-can-break-my-device
+```
+
+也可以选择真实设备目标。该模式会通过 Telnet 把 allowlist 文件先写入 `/tmp/fh-tool-restore` staging，远端 sha256 校验通过后才覆盖目标路径；仍然不会自动 reboot 或 factory reset：
+
+```bash
+fh-tool restore backup.tgz \
+  --target device \
+  --path /fhconf/usrconfig_conf \
+  --execute \
+  --yes --danger --i-know-this-can-break-my-device
+```
+
+当前 restore 只恢复 allowlist 内的配置文件，且会拒绝路径穿越、绝对路径逃逸和未知文件写入。`/proc/mtd`、runtime password 文件、restore/factory reset flag 等备份内容不会被恢复。恢复后会 read-back/hash verify；不会自动 reboot，也不会自动 factory reset。
+
+## CloudPlat / SmartSwitch
+
+CloudPlat 默认先做只读审计和计划：
+
+```bash
+fh-tool cloud status
+fh-tool cloud audit --output cloud-report.md
+fh-tool cloud plan
+```
+
+`cloud status/audit/plan` 会结构化显示 SmartSwitch 当前值、配置路径、禁用值、影响面和禁止改动项。禁用 SmartSwitch 只会写入 `InternetGatewayDevice.X_CT-COM_SmartSwitch.Enable=0`，需要先完成备份，并在写入后 read-back verify：
+
+```bash
+fh-tool cloud disable-smartswitch \
+  --backup-confirmed \
+  --yes --danger
+```
+
+该命令不会修改 LOID、PON、WAN VLAN、ServiceList 或 TR-069 VLAN。
 
 ## 22 个 `/fh_tool/api` method 覆盖
 
@@ -136,13 +253,25 @@ fh-tool download-url --url '/fh_tool/tool_download?file=xxx.tar.gz' --output xxx
 上传前先获取 token：
 
 ```bash
+fh-tool upload-plan --action preconfig --file sysinfo_conf
 fh-tool upload-prepare
+fh-tool upload-prepare --reveal-secrets
 ```
 
-上传 firmware/preconfig：
+上传 firmware/preconfig 前先 dry-run：
 
 ```bash
-fh-tool upload --action preconfig --file sysinfo_conf --sessionid TOKEN --yes --danger
+fh-tool upload --action preconfig --file sysinfo_conf --sessionid TOKEN --dry-run
+```
+
+真正上传属于 extreme 风险，只上传文件到 staging path，不会自动 reboot、restore 或切换 preconfig：
+
+```bash
+fh-tool upload \
+  --action preconfig \
+  --file sysinfo_conf \
+  --sessionid TOKEN \
+  --yes --danger --i-know-this-can-break-my-device
 ```
 
 ## 风险边界
@@ -150,8 +279,8 @@ fh-tool upload --action preconfig --file sysinfo_conf --sessionid TOKEN --yes --
 这些命令默认不会执行，必须显式确认：
 
 - `--yes`: 会写设备状态或创建下载文件。
-- `--danger`: 高风险写入、关闭 Telnet、执行 debug script、upload。
-- `--i-know-this-can-break-my-device`: 恢复出厂或重启。
+- `--danger`: 高风险写入、关闭 Telnet、执行 debug script。
+- `--i-know-this-can-break-my-device`: restore、firmware/preconfig upload、恢复出厂或重启。
 
 当前设备如果需要保持 Telnet 打开，不要运行：
 
