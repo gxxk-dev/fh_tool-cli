@@ -247,7 +247,7 @@ fh-tool cloud disable-smartswitch \
 | `CloseFHDebugLog` | `fh-tool close-fh-debug-log --yes` |
 | `OpenFHDebugLog` | `fh-tool open-fh-debug-log --yes` |
 
-raw call 入口：
+原始调用入口：
 
 ```bash
 fh-tool call --func GetDevInfo

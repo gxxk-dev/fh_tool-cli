@@ -643,12 +643,12 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
     add_yes(open_fh_debug_log)
     open_fh_debug_log.set_defaults(handler=_handler(handlers, "command_open_fh_debug_log"))
 
-    raw_call = subparsers.add_parser("call", help="raw fh_tool/api call")
+    raw_call = subparsers.add_parser("call", help="原始 fh_tool/api 调用")
     add_common_options(raw_call)
-    raw_call.add_argument("--func", required=True)
+    raw_call.add_argument("--func", required=True, help="要调用的 fh_tool/api 方法名")
     raw_call.add_argument("--param", action="append", default=[], help="k=v，可重复")
-    raw_call.add_argument("--json-payload", help="额外 JSON object 参数")
-    raw_call.add_argument("--allow-risky", action="store_true", help="允许 raw call 调用 risky func")
+    raw_call.add_argument("--json-payload", help="额外 JSON 对象参数")
+    raw_call.add_argument("--allow-risky", action="store_true", help="允许原始调用高风险方法")
     raw_call.set_defaults(handler=_handler(handlers, "command_raw_call"))
 
     download_url = subparsers.add_parser("download-url", help="下载 /fh_tool/tool_download 返回文件")
