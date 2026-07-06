@@ -24,6 +24,18 @@ uv run fh-tool --help
 
 下文示例中的 `fh-tool ...` 如果是在源码目录内运行，可以统一写成 `uv run fh-tool ...`。
 
+## CLI 输出和日志
+
+CLI 入口使用 Click，错误和日志输出使用 Rich。命令结果只写 stdout；错误、警告和日志写 stderr，便于脚本把 stdout 当作数据流处理。
+
+```bash
+fh-tool --verbose probe --json
+fh-tool --quiet config show
+fh-tool --log-file fh-tool.log dev-info
+```
+
+`--json` 输出稳定的 machine-readable JSON，不混入日志或样式。当前默认人类输出仍保持 pretty JSON，以兼容已有脚本；后续可以在不影响 `--json` 的前提下逐步增加表格化输出。
+
 ## 快速配置
 
 保存默认 IP/MAC：

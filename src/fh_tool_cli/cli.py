@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from pathlib import Path
@@ -101,17 +100,7 @@ from .upload import (
     upload_file_info,
     upload_workflow_plan,
 )
-
-
-def emit(data: Any, json_mode: bool) -> None:
-    if json_mode:
-        print(json.dumps(data, ensure_ascii=False, indent=2))
-        return
-
-    if isinstance(data, dict):
-        print(json.dumps(data, ensure_ascii=False, indent=2))
-    else:
-        print(data)
+from .output import emit
 
 
 SENSITIVE_PLAN_KEY_RE = re.compile(
@@ -1043,18 +1032,9 @@ def add_api_command(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    try:
-        result = args.handler(args)
-    except (argparse.ArgumentTypeError, CliError, FHToolError, ValueError) as exc:
-        print(f"错误: {exc}", file=sys.stderr)
-        return 2
-    except KeyboardInterrupt:
-        print("已取消", file=sys.stderr)
-        return 130
+    from .click_cli import run_click_cli
 
-    emit(result, getattr(args, "json", False))
-    return 0
+    return run_click_cli(argv, _command_handlers())
 
 
 if __name__ == "__main__":
