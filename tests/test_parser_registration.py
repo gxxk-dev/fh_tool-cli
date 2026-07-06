@@ -11,6 +11,9 @@ class ParserRegistrationTests(unittest.TestCase):
             (["probe", "--ip", "192.168.1.1"], cli.command_probe),
             (["cfg", "get", "InternetGatewayDevice.DeviceInfo.Manufacturer"], cli.command_cfg_get),
             (["wan", "list", "--backend", "local-vm"], cli.command_wan_list),
+            (["vm", "collect", "--ip", "192.168.1.1", "--output", "/tmp/dumps"], cli.command_vm_collect),
+            (["vm", "build", "--dump-dir", "/tmp/dumps", "--output", "/tmp/vm"], cli.command_vm_build),
+            (["vm", "verify", "--vm-root", "/tmp/vm"], cli.command_vm_verify),
             (["config", "show"], cli.command_config_show),
             (["reboot", "--ip", "192.168.1.1"], cli.command_reboot),
         ]
