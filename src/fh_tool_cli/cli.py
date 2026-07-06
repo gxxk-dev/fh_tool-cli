@@ -101,6 +101,9 @@ from .upload import (
     upload_workflow_plan,
 )
 from .output import emit
+from .vm_build import build_vm
+from .vm_collect import collect_vm_dumps
+from .vm_verify import verify_vm
 
 
 SENSITIVE_PLAN_KEY_RE = re.compile(
@@ -292,6 +295,42 @@ def command_backup_create(args: argparse.Namespace) -> dict[str, Any]:
 
 def command_backup_verify(args: argparse.Namespace) -> dict[str, Any]:
     return verify_backup(Path(args.path).expanduser())
+
+
+def command_vm_collect(args: argparse.Namespace) -> dict[str, Any]:
+    confirmed = is_confirmed(args)
+    result_prefix: dict[str, Any] = {}
+    if confirmed and args.auto_enable_telnet:
+        result_prefix["auto_enable_telnet"] = call_method(args, "TelnetEnable", {"telnet": "1"})
+    result = collect_vm_dumps(
+        shell_runner=_telnet_root_shell_runner_from_args(args) if confirmed else (lambda _command: ""),
+        output_dir=Path(args.output).expanduser(),
+        confirmed=confirmed,
+        all_mtd=args.all_mtd,
+        requested_partitions=args.partition,
+        chunk_size=args.chunk_size,
+        retries=args.retries,
+    )
+    if result_prefix:
+        result.update(result_prefix)
+    return result
+
+
+def command_vm_build(args: argparse.Namespace) -> dict[str, Any]:
+    return build_vm(
+        dump_dir=Path(args.dump_dir).expanduser(),
+        output_dir=Path(args.output).expanduser(),
+        rootfs_slot=args.rootfs_slot,
+        force=args.force,
+    )
+
+
+def command_vm_verify(args: argparse.Namespace) -> dict[str, Any]:
+    return verify_vm(
+        vm_root=Path(args.vm_root).expanduser(),
+        with_fhapi=args.with_fhapi,
+        with_http=args.with_http,
+    )
 
 
 def command_restore_backup(args: argparse.Namespace) -> dict[str, Any]:
@@ -981,6 +1020,9 @@ def _command_handlers() -> dict[str, Any]:
         "command_config_decrypt": command_config_decrypt,
         "command_backup_create": command_backup_create,
         "command_backup_verify": command_backup_verify,
+        "command_vm_collect": command_vm_collect,
+        "command_vm_build": command_vm_build,
+        "command_vm_verify": command_vm_verify,
         "command_restore_backup": command_restore_backup,
         "command_credentials_derive": command_credentials_derive,
         "command_cfg_get": command_cfg_get,

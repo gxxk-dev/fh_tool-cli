@@ -217,6 +217,42 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
     backup_verify.add_argument("--json", action="store_true", help="输出 machine-readable JSON")
     backup_verify.set_defaults(handler=_handler(handlers, "command_backup_verify"))
 
+    vm = subparsers.add_parser("vm", help="采集、构建和验证 HG5143F userspace VM")
+    vm_subparsers = vm.add_subparsers(
+        dest="vm_command",
+        required=True,
+        metavar="SUBCOMMAND",
+        title="vm commands",
+    )
+    vm_collect = vm_subparsers.add_parser("collect", help="通过 Telnet 安全采集 VM 所需 MTD dump")
+    add_telnet_options(vm_collect)
+    for action in vm_collect._actions:
+        if action.dest == "timeout":
+            action.default = 60.0
+            action.help = "Telnet command timeout 秒数，默认 60"
+            break
+    add_write_confirmation(vm_collect)
+    vm_collect.add_argument("--output", required=True, help="写入 dump 目录")
+    vm_collect.add_argument("--auto-enable-telnet", action="store_true", help="确认后先调用 TelnetEnable=1")
+    vm_collect.add_argument("--all-mtd", action="store_true", help="采集 mtd0-mtd7 物理分区")
+    vm_collect.add_argument("--partition", action="append", default=[], help="只采集指定 mtdN/name，可重复")
+    vm_collect.add_argument("--chunk-size", type=int, default=262144, help="nanddump/base64 chunk bytes，默认 262144")
+    vm_collect.add_argument("--retries", type=int, default=3, help="chunk decode/长度不匹配重试次数，默认 3")
+    vm_collect.set_defaults(handler=_handler(handlers, "command_vm_collect"))
+    vm_build = vm_subparsers.add_parser("build", help="从 dump 构建本地 proot/qemu-arm-static VM")
+    vm_build.add_argument("--dump-dir", required=True, help="包含 MTD dump 的目录")
+    vm_build.add_argument("--output", required=True, help="写入 VM 工作区目录")
+    vm_build.add_argument("--rootfs-slot", choices=["active", "A", "B"], default="active", help="rootfs slot，默认 active")
+    vm_build.add_argument("--force", action="store_true", help="覆盖已有输出目录")
+    vm_build.add_argument("--json", action="store_true", help="输出 machine-readable JSON")
+    vm_build.set_defaults(handler=_handler(handlers, "command_vm_build"))
+    vm_verify = vm_subparsers.add_parser("verify", help="验证本地 VM 工作区")
+    vm_verify.add_argument("--vm-root", required=True, help="VM 工作区目录，不是 rootfs-vm 子目录")
+    vm_verify.add_argument("--with-fhapi", action="store_true", help="启动 ubusd + cfgmgr 并验证 cfg_cmd read")
+    vm_verify.add_argument("--with-http", action="store_true", help="端口空闲时启动并验证 HTTP stack")
+    vm_verify.add_argument("--json", action="store_true", help="输出 machine-readable JSON")
+    vm_verify.set_defaults(handler=_handler(handlers, "command_vm_verify"))
+
     restore_backup = subparsers.add_parser("restore", help="从 backup archive 安全恢复 allowlist 配置")
     add_telnet_options(restore_backup)
     restore_backup.add_argument("backup", help="fh-tool backup 生成的 backup.tgz")
