@@ -10,6 +10,7 @@ from typing import Any, Callable
 import requests
 
 from .account import (
+    PasswordInput,
     account_show,
     read_secret_from_args,
     set_su_runtime_password,
@@ -63,9 +64,12 @@ from .config_store import (
     resolve_mac,
     save_config,
 )
+from .credential_sources import (
+    complete_hg5143f_telnet_login,
+    derive_hg5143f_su_password_from_args,
+)
 from .credentials import (
     derive_credentials,
-    derive_hg5143f_telnet,
 )
 from .diagnostics import (
     firewall_status,
@@ -355,18 +359,12 @@ def _telnet_credentials_from_args(args: argparse.Namespace) -> TelnetCredentials
     ip, _ip_source = resolve_ip(args)
     username = getattr(args, "username", None)
     password = _password_from_args(args)
-
-    if getattr(args, "use_derived_credentials", False):
-        mac, _mac_source = resolve_mac(args, ip, required=True)
-        assert mac is not None
-        derived = derive_hg5143f_telnet(mac)
-        if username and username != derived.username and password is None:
-            raise CliError(
-                "--use-derived-credentials 只能为默认 HG5143F Telnet 账号补齐密码；"
-                "自定义 --username 需要同时提供密码"
-            )
-        username = username or derived.username
-        password = password or derived.password
+    username, password = complete_hg5143f_telnet_login(
+        args,
+        ip=ip,
+        username=username,
+        password=password,
+    )
 
     return TelnetCredentials(
         host=ip,
@@ -525,13 +523,41 @@ def command_account_set_su_runtime_password(args: argparse.Namespace) -> dict[st
         return _write_dry_run_plan(
             "account set-su-runtime-password",
             "set-su-runtime-password 会覆写 runtime su password",
-            target={"password_input": _password_input_mode(args)},
+            target={"input_mode": _su_runtime_password_input_mode(args)},
             side_effects={"runtime_password_write": False},
         )
-    secret = read_secret_from_args(args)
+    secret, password_source = _su_runtime_password_from_args(args)
     result = set_su_runtime_password(_telnet_shell_from_args(args).run, secret.password)
     result["generated"] = secret.generated
+    result["password_source"] = password_source
     return result
+
+
+def _su_runtime_password_from_args(args: argparse.Namespace) -> tuple[PasswordInput, str]:
+    selected = [
+        getattr(args, "password", None) is not None,
+        getattr(args, "password_stdin", False),
+        getattr(args, "generate", False),
+    ]
+    if any(selected):
+        secret = read_secret_from_args(args)
+        if getattr(args, "password", None) is not None:
+            return secret, "argument"
+        if getattr(args, "password_stdin", False):
+            return secret, "stdin"
+        return secret, "generate"
+    ip, _ip_source = resolve_ip(args)
+    return PasswordInput(
+        derive_hg5143f_su_password_from_args(args, ip=ip),
+        generated=False,
+    ), "derived-hg5143f-su"
+
+
+def _su_runtime_password_input_mode(args: argparse.Namespace) -> str:
+    mode = _password_input_mode(args)
+    if mode == "required_on_confirm":
+        return "derived-hg5143f-su-on-confirm"
+    return mode
 
 
 def command_autoupdate_status(args: argparse.Namespace) -> dict[str, Any]:

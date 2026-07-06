@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from fh_tool_cli.cli import _telnet_credentials_from_args, parse_args
+from fh_tool_cli.commands.web import _web_telnet_login_from_args
 from fh_tool_cli.credentials import (
     HG5143F_SU_PASSWORD_PREFIX,
     HG5143F_TELNET_PASSWORD_PREFIX,
@@ -21,7 +22,7 @@ class CredentialsTests(unittest.TestCase):
         self.assertEqual(credential.username, "telnetadmin")
         self.assertTrue(credential.password.startswith(HG5143F_TELNET_PASSWORD_PREFIX))
         self.assertTrue(credential.password.endswith("36BC10"))
-        self.assertEqual(credential.integration_level, "explicit-opt-in-telnet-fallback")
+        self.assertEqual(credential.integration_level, "automatic-telnet-fallback")
 
     def test_hg5143f_su_derivation_is_display_only(self) -> None:
         credential = derive_hg5143f_su("D8F50736BC10")
@@ -70,7 +71,7 @@ class CredentialsTests(unittest.TestCase):
         self.assertEqual(result["credentials"][0]["password"], "[REDACTED]")
         self.assertEqual(result["credentials"][0]["target"], "telnet-login")
 
-    def test_telnet_derived_credentials_are_explicit_fallback(self) -> None:
+    def test_telnet_derived_credentials_are_default_fallback(self) -> None:
         args = parse_args(
             [
                 "cfg",
@@ -80,7 +81,6 @@ class CredentialsTests(unittest.TestCase):
                 "192.168.1.1",
                 "--mac",
                 "D8F50736BC10",
-                "--use-derived-credentials",
             ]
         )
 
@@ -89,6 +89,25 @@ class CredentialsTests(unittest.TestCase):
         self.assertEqual(credentials.username, "telnetadmin")
         self.assertIsNotNone(credentials.password)
         self.assertTrue(credentials.password.endswith("36BC10"))
+
+    def test_telnet_derived_credentials_can_be_disabled(self) -> None:
+        args = parse_args(
+            [
+                "cfg",
+                "get",
+                "InternetGatewayDevice.DeviceInfo.Manufacturer",
+                "--ip",
+                "192.168.1.1",
+                "--mac",
+                "D8F50736BC10",
+                "--no-derived-credentials",
+            ]
+        )
+
+        credentials = _telnet_credentials_from_args(args)
+
+        self.assertIsNone(credentials.username)
+        self.assertIsNone(credentials.password)
 
     def test_explicit_telnet_password_overrides_derived_password(self) -> None:
         args = parse_args(
@@ -131,6 +150,26 @@ class CredentialsTests(unittest.TestCase):
 
         with self.assertRaises(CliError):
             _telnet_credentials_from_args(args)
+
+    def test_web_cfg_telnet_source_uses_derived_credentials_by_default(self) -> None:
+        args = parse_args(
+            [
+                "web",
+                "ajax",
+                "get",
+                "get_base_info",
+                "--ip",
+                "192.168.1.1",
+                "--mac",
+                "D8F50736BC10",
+            ]
+        )
+
+        username, password = _web_telnet_login_from_args(args, "192.168.1.1")
+
+        self.assertEqual(username, "telnetadmin")
+        self.assertIsNotNone(password)
+        self.assertTrue(password.endswith("36BC10"))
 
 
 if __name__ == "__main__":

@@ -118,7 +118,12 @@ def add_telnet_options(
     parser.add_argument(
         "--use-derived-credentials",
         action="store_true",
-        help="显式使用已验证的 HG5143F 派生 Telnet 凭据作为 fallback",
+        help="兼容参数；HG5143F 派生 Telnet 凭据现在默认作为 fallback",
+    )
+    parser.add_argument(
+        "--no-derived-credentials",
+        action="store_true",
+        help="关闭默认 HG5143F 派生 Telnet 凭据 fallback",
     )
 
 

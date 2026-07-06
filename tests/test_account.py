@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import unittest
+from unittest.mock import patch
 
 from fh_tool_cli.account import (
     TELNET_PASSWORD_PATH,
@@ -12,6 +13,8 @@ from fh_tool_cli.account import (
     set_telnet_password,
 )
 from fh_tool_cli.backends.cfg_cmd import CfgCmdBackend
+from fh_tool_cli.cli import parse_args
+from fh_tool_cli.credentials import HG5143F_SU_PASSWORD_PREFIX
 from fh_tool_cli.errors import CliError
 
 
@@ -70,6 +73,50 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(result["value"], "[REDACTED]")
         self.assertFalse(result["persistent"])
         self.assertEqual(len(calls), 1)
+
+    def test_set_su_runtime_password_uses_derived_default(self) -> None:
+        calls: list[str] = []
+        args = parse_args(
+            [
+                "account",
+                "set-su-runtime-password",
+                "--ip",
+                "192.168.1.1",
+                "--mac",
+                "D8F50736BC10",
+                "--confirm",
+            ]
+        )
+
+        class FakeShell:
+            def run(self, command: str) -> str:
+                calls.append(command)
+                return "ok"
+
+        with patch("fh_tool_cli.cli._telnet_shell_from_args", return_value=FakeShell()):
+            result = args.handler(args)
+
+        self.assertEqual(result["password_source"], "derived-hg5143f-su")
+        self.assertEqual(result["value"], "[REDACTED]")
+        self.assertIn(HG5143F_SU_PASSWORD_PREFIX, calls[0])
+        self.assertIn("36BC10", calls[0])
+
+    def test_set_su_runtime_password_dry_run_mentions_derived_default(self) -> None:
+        args = parse_args(
+            [
+                "account",
+                "set-su-runtime-password",
+                "--ip",
+                "192.168.1.1",
+                "--mac",
+                "D8F50736BC10",
+            ]
+        )
+
+        result = args.handler(args)
+
+        self.assertEqual(result["target"]["input_mode"], "derived-hg5143f-su-on-confirm")
+        self.assertFalse(result["executed"])
 
 
 if __name__ == "__main__":

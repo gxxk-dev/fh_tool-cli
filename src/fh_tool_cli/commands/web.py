@@ -15,6 +15,7 @@ from ..backends.local_vm import DEFAULT_VM_ROOT, LocalVmShell
 from ..backends.telnet import TelnetCredentials, TelnetShell
 from ..backends.web_ajax import DEFAULT_AJAX_PATH, DEFAULT_WEB_LOGIN_PORT, WebAjaxClient
 from ..config_store import DEFAULT_CONFIG_PATH, normalize_ip, resolve_ip, resolve_mac
+from ..credential_sources import complete_hg5143f_telnet_login
 from ..errors import CliError, FHToolError
 from ..risk import dry_run_notice, is_confirmed
 from ..web_discovery import (
@@ -188,29 +189,40 @@ def _cfg_backend_from_web_args(args: argparse.Namespace) -> CfgCmdBackend:
             expensive_missing_paths=True,
         )
     ip, _ip_source = resolve_ip(args)
+    username, password = _web_telnet_login_from_args(args, ip)
     return CfgCmdBackend(
         TelnetShell(
             TelnetCredentials(
                 host=ip,
                 port=getattr(args, "telnet_port", 23),
-                username=getattr(args, "telnet_username", None),
-                password=_web_telnet_password_from_args(args),
+                username=username,
+                password=password,
                 timeout=args.timeout,
             )
         ).run
     )
 
 
-def _web_telnet_password_from_args(args: argparse.Namespace) -> str | None:
+def _web_telnet_login_from_args(
+    args: argparse.Namespace,
+    ip: str,
+) -> tuple[str | None, str | None]:
     has_password = getattr(args, "telnet_password", None) is not None
     has_stdin = getattr(args, "telnet_password_stdin", False)
     if has_password and has_stdin:
         raise CliError("cfg password source 只能选择 --telnet-password 或 --telnet-password-stdin")
+    username = getattr(args, "telnet_username", None)
+    password: str | None = None
     if has_stdin:
-        return sys.stdin.readline().rstrip("\n")
-    if has_password:
-        return str(args.telnet_password)
-    return None
+        password = sys.stdin.readline().rstrip("\n")
+    elif has_password:
+        password = str(args.telnet_password)
+    return complete_hg5143f_telnet_login(
+        args,
+        ip=ip,
+        username=username,
+        password=password,
+    )
 
 
 def _extract_password_from_mapping(value: Any) -> str | None:
@@ -557,6 +569,11 @@ def add_web_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--telnet-username", help="cfg 密码来源 Telnet 用户名")
     parser.add_argument("--telnet-password", help="cfg 密码来源 Telnet 密码")
     parser.add_argument("--telnet-password-stdin", action="store_true", help="从 stdin 读取 cfg 密码来源 Telnet 密码")
+    parser.add_argument(
+        "--no-derived-credentials",
+        action="store_true",
+        help="关闭 cfg 密码来源的默认 HG5143F 派生 Telnet 凭据 fallback",
+    )
     parser.add_argument("--reveal-secrets", action="store_true", help="输出 Web AJAX sensitive 明文")
     parser.add_argument("--json", action="store_true", help="输出 machine-readable JSON")
 

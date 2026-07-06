@@ -121,7 +121,7 @@ fh-tool wan list --backend local-vm
 
 `local-vm` 只是在本机 proot VM 内执行厂商 `cfg_cmd`。`--vm-root` 必须指向 VM 工作区目录，也就是包含 `bin/proot-shell` 和 `rootfs-vm/fhrom/bin/cfg_cmd` 的目录；默认是 `/mnt/dev-cold/HG5143F-ONU-vm`。不要把它指到里面的 `rootfs-vm/`。
 
-Web AJAX 读取命令只读。需要复用已有 Web session 时加 `--sessionid`；需要登录时可显式传 `--password-stdin` 或 `--password`。未显式提供密码时默认 `--username useradmin --password-source auto`，会依次尝试 `GetAdminAccount` 和 cfg 路径读取 Web superadmin 密码；失败不会阻塞只读抓取。sessionid、密码、LOID、PPPoE 等敏感字段默认会脱敏；只有显式加 `--reveal-secrets` 才输出明文。
+Web AJAX 读取命令只读。需要复用已有 Web session 时加 `--sessionid`；需要登录时可显式传 `--password-stdin` 或 `--password`。未显式提供密码时默认 `--username useradmin --password-source auto`，会依次尝试 `GetAdminAccount` 和 cfg 路径读取 Web superadmin 密码；cfg 来源需要 Telnet 时会默认使用 HG5143F 派生 Telnet 凭据 fallback，可用 `--no-derived-credentials` 关闭。失败不会阻塞只读抓取。sessionid、密码、LOID、PPPoE 等敏感字段默认会脱敏；只有显式加 `--reveal-secrets` 才输出明文。
 
 后台 AJAX 接口发现以 live discovery 为主路径，不需要 HAR，也不需要 rootfs：
 
@@ -146,11 +146,12 @@ fh-tool web services set --service telnet --enabled 0 --confirm
 
 常规 Web 写接口优先使用 typed 参数。`web ajax post` 和 `web ajax replay` 支持任意已知或未知 AJAX method，默认只输出计划，不发 POST；执行必须加 `--confirm`，且默认拒绝空 payload。`--json-payload` 和可重复的 `--param k=v` 仍保留为固件差异逃生口，合并顺序是 typed 参数、JSON、最后 `--param` 覆盖。旧的确认参数会直接报弃用错误。
 
-Telnet/cfg/诊断命令默认不会自动套用派生凭据。如果设备仍是 HG5143F 默认 Telnet 规则，并且已提供或保存 MAC，可以显式加 `--use-derived-credentials` 作为 fallback：
+Telnet/cfg/诊断命令在未显式传 Telnet 密码时，会默认使用 HG5143F 派生 Telnet 凭据 fallback；显式传入的用户名/密码始终优先。如果设备不是该规则，或需要保留空凭据/自定义认证，可加 `--no-derived-credentials` 关闭。`--use-derived-credentials` 仍作为兼容参数接受：
 
 ```bash
-fh-tool cfg get InternetGatewayDevice.DeviceInfo.Manufacturer --use-derived-credentials
-fh-tool wan list --use-derived-credentials
+fh-tool cfg get InternetGatewayDevice.DeviceInfo.Manufacturer
+fh-tool wan list
+fh-tool cfg get InternetGatewayDevice.DeviceInfo.Manufacturer --no-derived-credentials
 ```
 
 诊断命令保持只读；`ip status` 这类依赖 VM/userspace 工具的命令会分别标记每个 probe 的 `ok/output/error`，工具缺失时输出 `partial_failure=true`，不会吞掉其它已成功字段。

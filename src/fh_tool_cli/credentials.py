@@ -59,7 +59,7 @@ def derive_hg5143f_telnet(mac: str) -> DerivedCredential:
         persistent=True,
         target="telnet-login",
         confidence="high-hg5143f-local-live-verified",
-        integration_level="explicit-opt-in-telnet-fallback",
+        integration_level="automatic-telnet-fallback",
         note=(
             "Default Telnet login credential observed on HG5143F V4 firmware. "
             "Explicit CLI username/password still override it."
