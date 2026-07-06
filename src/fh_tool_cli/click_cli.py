@@ -257,6 +257,14 @@ def _parameter_from_action(action: argparse.Action) -> click.Parameter | None:
 
 
 def _option_from_action(action: argparse.Action) -> click.Option:
+    option_strings = list(action.option_strings)
+    inferred_names = {
+        option.lstrip("-").replace("-", "_")
+        for option in option_strings
+        if option.startswith("--")
+    }
+    if action.dest not in inferred_names:
+        option_strings.append(action.dest)
     kwargs: dict[str, Any] = {
         "help": None if action.help is argparse.SUPPRESS else action.help,
         "hidden": action.help is argparse.SUPPRESS,
@@ -279,7 +287,7 @@ def _option_from_action(action: argparse.Action) -> click.Option:
             type=_type_from_action(action),
         )
 
-    return click.Option(list(action.option_strings), **kwargs)
+    return click.Option(option_strings, **kwargs)
 
 
 def _argument_from_action(action: argparse.Action) -> click.Argument:
