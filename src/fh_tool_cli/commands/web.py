@@ -81,10 +81,10 @@ def _web_login_if_requested(
     explicit_secret = getattr(args, "password", None) is not None or getattr(args, "password_stdin", False)
     explicit_username = getattr(args, "username", None) is not None
     explicit_source = password_source != "auto"
-    if client.sessionid and force_auto and not (explicit_secret or explicit_username or explicit_source):
+    if _has_explicit_web_sessionid(args) and force_auto and not (explicit_secret or explicit_source):
         return {
             "attempted": False,
-            "username": DEFAULT_WEB_USERNAME,
+            "username": getattr(args, "username", None) or DEFAULT_WEB_USERNAME,
             "password_source": "sessionid",
             "sessionid_present": True,
         }
@@ -95,6 +95,8 @@ def _web_login_if_requested(
     password, source, errors = _web_password_from_args(args)
     if password is None:
         if password_source == "none":
+            if require_success and not client.sessionid:
+                raise CliError("Web login 需要密码或显式 --sessionid")
             return {
                 "attempted": False,
                 "username": username,
@@ -112,11 +114,23 @@ def _web_login_if_requested(
             "error": error,
         }
 
-    result = client.login(
-        username,
-        password,
-        port=getattr(args, "web_login_port", DEFAULT_WEB_LOGIN_PORT),
-    )
+    try:
+        result = client.login(
+            username,
+            password,
+            port=getattr(args, "web_login_port", DEFAULT_WEB_LOGIN_PORT),
+        )
+    except FHToolError as exc:
+        if require_success:
+            raise CliError(f"Web login failed: {exc}") from exc
+        return {
+            "attempted": True,
+            "username": username,
+            "password_source": source,
+            "sessionid_present": bool(client.sessionid),
+            "ok": False,
+            "error": str(exc),
+        }
     result["attempted"] = True
     result["password_source"] = source
     if require_success and not result["ok"]:
@@ -124,6 +138,10 @@ def _web_login_if_requested(
     if not result["ok"]:
         result["error"] = f"login_result={result.get('login_result')}"
     return result
+
+
+def _has_explicit_web_sessionid(args: argparse.Namespace) -> bool:
+    return getattr(args, "sessionid", None) is not None
 
 
 def _web_password_from_args(args: argparse.Namespace) -> tuple[str | None, str, list[str]]:
@@ -263,8 +281,10 @@ def command_web_login_check(args: argparse.Namespace) -> dict[str, Any]:
 
 def command_web_ajax_get(args: argparse.Namespace) -> dict[str, Any]:
     client = _web_client_from_args(args)
-    _web_login_if_requested(client, args)
-    return client.ajax_get(args.method)
+    login_result = _web_read_login(client, args)
+    result = client.ajax_get(args.method)
+    result["login"] = _auth_summary(login_result)
+    return result
 
 
 def command_web_ajax_post(args: argparse.Namespace) -> dict[str, Any]:
@@ -453,6 +473,10 @@ def _auth_summary(auth: dict[str, Any] | None) -> dict[str, Any]:
     return summary
 
 
+def _web_read_login(client: WebAjaxClient, args: argparse.Namespace) -> dict[str, Any] | None:
+    return _web_login_if_requested(client, args, require_success=False, force_auto=True)
+
+
 def _require_lan_target(args: argparse.Namespace) -> None:
     ip, _ip_source = resolve_ip(args)
     address = ipaddress.ip_address(ip)
@@ -464,15 +488,17 @@ def _require_lan_target(args: argparse.Namespace) -> None:
 def command_web_typed(group: str, action: str) -> Callable[[argparse.Namespace], dict[str, Any]]:
     def handler(args: argparse.Namespace) -> dict[str, Any]:
         client = _web_client_from_args(args)
-        _web_login_if_requested(client, args)
-        return client.typed(group, action)
+        login_result = _web_read_login(client, args)
+        result = client.typed(group, action)
+        result["login"] = _auth_summary(login_result)
+        return result
 
     return handler
 
 
 def command_web_diagnostics_show(args: argparse.Namespace) -> dict[str, Any]:
     client = _web_client_from_args(args)
-    _web_login_if_requested(client, args)
+    login_result = _web_read_login(client, args)
     requested = args.view or [
         "wan",
         "port-mapping",
@@ -501,6 +527,7 @@ def command_web_diagnostics_show(args: argparse.Namespace) -> dict[str, Any]:
             "errors": errors,
             "partial_failure": bool(errors),
             "sessionid_present": bool(client.sessionid),
+            "login": _auth_summary(login_result),
         }
     }
 
@@ -517,8 +544,12 @@ def command_web_typed_write(group: str, action: str) -> Callable[[argparse.Names
         if not payload:
             raise CliError("Web AJAX write 需要 typed 参数、--param 或 --json-payload")
         client = _web_client_from_args(args)
-        _web_login_if_requested(client, args)
+        login_result = None
+        if not dry_run:
+            login_result = _web_login_if_requested(client, args, require_success=True, force_auto=True)
         result = client.typed_write(group, action, payload, dry_run=dry_run)
+        if login_result is not None:
+            result["login"] = _auth_summary(login_result)
         if dry_run:
             result["plan"] = {"execute_requires": ["--confirm"]}
             result.update(dry_run_notice())

@@ -11,7 +11,19 @@ from fh_tool_cli.web_writes import build_web_write_payload
 
 
 class RecordingWebClient:
-    sessionid = None
+    def __init__(self) -> None:
+        self.sessionid: str | None = None
+        self.calls: list[tuple[str, object]] = []
+
+    def login(self, username: str, password: str, *, port: str) -> dict[str, object]:
+        self.calls.append(("login", (username, password, port)))
+        self.sessionid = "sid-after-login"
+        return {
+            "ok": True,
+            "username": username,
+            "login_result": 0,
+            "sessionid_present": True,
+        }
 
     def typed_write(
         self,
@@ -21,6 +33,7 @@ class RecordingWebClient:
         *,
         dry_run: bool = True,
     ) -> dict[str, object]:
+        self.calls.append(("typed_write", (group, action, payload, dry_run)))
         return {
             "group": group,
             "action": action,
@@ -312,6 +325,67 @@ class WebWritePayloadTests(unittest.TestCase):
         )
 
         self.assertEqual(result["payload"], {"action": "terminal_number", "terminal_number": "32"})
+
+    def test_typed_write_dry_run_does_not_login_even_with_password(self) -> None:
+        client = RecordingWebClient()
+        args = parse_args(
+            [
+                "web",
+                "services",
+                "set",
+                "--service",
+                "telnet",
+                "--enabled",
+                "0",
+                "--password",
+                "plain-secret",
+                "--ip",
+                "192.168.1.1",
+            ]
+        )
+
+        with patch("fh_tool_cli.commands.web._web_client_from_args", return_value=client):
+            result = args.handler(args)
+
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(
+            client.calls,
+            [("typed_write", ("services", "set", {"action": "telnet", "telnet": "0"}, True))],
+        )
+
+    def test_typed_write_confirm_logs_in_before_post(self) -> None:
+        client = RecordingWebClient()
+        args = parse_args(
+            [
+                "web",
+                "services",
+                "set",
+                "--service",
+                "telnet",
+                "--enabled",
+                "0",
+                "--confirm",
+                "--ip",
+                "192.168.1.1",
+            ]
+        )
+
+        with (
+            patch("fh_tool_cli.commands.web._web_client_from_args", return_value=client),
+            patch("fh_tool_cli.commands.web._web_password_from_args", return_value=("auto-secret", "cfg", [])),
+        ):
+            result = args.handler(args)
+
+        self.assertFalse(result["dry_run"])
+        self.assertEqual(
+            client.calls,
+            [
+                ("login", ("useradmin", "auto-secret", "0")),
+                ("typed_write", ("services", "set", {"action": "telnet", "telnet": "0"}, False)),
+            ],
+        )
+        self.assertEqual(result["login"]["password_source"], "cfg")
+        self.assertNotIn("auto-secret", str(result))
 
     def test_generic_payload_still_works_and_param_overrides_typed_values(self) -> None:
         result = _run_web_command(

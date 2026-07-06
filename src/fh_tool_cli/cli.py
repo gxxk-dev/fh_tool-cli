@@ -299,7 +299,7 @@ def command_restore_backup(args: argparse.Namespace) -> dict[str, Any]:
     if args.target == "device":
         result = restore_backup_to_device(
             Path(args.backup).expanduser(),
-            shell_runner=_telnet_shell_from_args(args).run,
+            shell_runner=_telnet_root_shell_runner_from_args(args),
             dry_run=dry_run,
             paths=args.path,
             remote_tmpdir=args.remote_tmpdir,
@@ -378,6 +378,36 @@ def _cfg_backend_from_args(args: argparse.Namespace) -> CfgCmdBackend:
 
 def _telnet_shell_from_args(args: argparse.Namespace) -> TelnetShell:
     return TelnetShell(_telnet_credentials_from_args(args))
+
+
+def _telnet_root_shell_runner_from_args(args: argparse.Namespace) -> Callable[[str], str]:
+    if getattr(args, "backend", "telnet") == "local-vm":
+        return LocalVmShell(
+            Path(args.vm_root).expanduser(),
+            timeout=args.timeout,
+        ).run
+    ip, _ip_source = resolve_ip(args)
+    su_password = _current_su_password_from_args(args, ip=ip)
+    shell = _telnet_shell_from_args(args)
+
+    def run(command: str) -> str:
+        return shell.run_as_root(command, su_password=su_password)
+
+    return run
+
+
+def _current_su_password_from_args(args: argparse.Namespace, *, ip: str) -> str:
+    has_password = getattr(args, "su_password", None) is not None
+    has_stdin = getattr(args, "su_password_stdin", False)
+    if has_password and has_stdin:
+        raise CliError("当前 su root 密码只能选择 --su-password 或 --su-password-stdin")
+    if has_stdin:
+        if getattr(args, "password_stdin", False) or getattr(args, "telnet_password_stdin", False):
+            raise CliError("--su-password-stdin 不能和其它 stdin 密码选项同时使用")
+        return sys.stdin.readline().rstrip("\n")
+    if has_password:
+        return str(args.su_password)
+    return derive_hg5143f_su_password_from_args(args, ip=ip)
 
 
 def _shell_runner_from_args(args: argparse.Namespace) -> Callable[[str], str]:
@@ -516,7 +546,7 @@ def command_account_set_su_runtime_password(args: argparse.Namespace) -> dict[st
             side_effects={"runtime_password_write": False},
         )
     secret, password_source = _su_runtime_password_from_args(args)
-    result = set_su_runtime_password(_telnet_shell_from_args(args).run, secret.password)
+    result = set_su_runtime_password(_telnet_root_shell_runner_from_args(args), secret.password)
     result["generated"] = secret.generated
     result["password_source"] = password_source
     return result
@@ -570,10 +600,10 @@ def command_autoupdate_plan(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_tr069_status(args: argparse.Namespace) -> dict[str, Any]:
-    shell = _telnet_shell_from_args(args)
+    shell_runner = _telnet_root_shell_runner_from_args(args)
     return tr069_status(
         _cfg_backend_from_args(args),
-        shell.run,
+        shell_runner,
         reveal_secrets=args.reveal_secrets,
     )
 
@@ -624,10 +654,10 @@ def command_tr069_randomize_connection_request(args: argparse.Namespace) -> dict
 
 
 def command_cloud_status(args: argparse.Namespace) -> dict[str, Any]:
-    shell = _telnet_shell_from_args(args)
+    shell_runner = _telnet_root_shell_runner_from_args(args)
     return cloud_status(
         _cfg_backend_from_args(args),
-        shell.run,
+        shell_runner,
         reveal_secrets=args.reveal_secrets,
     )
 
@@ -659,7 +689,7 @@ def command_cloud_disable_cloudclt(args: argparse.Namespace) -> dict[str, Any]:
             "cloud disable-cloudclt 会停止/禁用 cloud client",
             side_effects={"shell_write": False, "service_stop": False},
         )
-    return cloud_disable_cloudclt(_telnet_shell_from_args(args).run)
+    return cloud_disable_cloudclt(_telnet_root_shell_runner_from_args(args))
 
 
 def command_cloud_disable_smartswitch(args: argparse.Namespace) -> dict[str, Any]:
@@ -686,7 +716,7 @@ def command_vlan_list(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_ip_status(args: argparse.Namespace) -> dict[str, Any]:
-    return ip_status(_shell_runner_from_args(args))
+    return ip_status(_telnet_root_shell_runner_from_args(args))
 
 
 def command_firewall_status(args: argparse.Namespace) -> dict[str, Any]:

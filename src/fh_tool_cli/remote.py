@@ -36,6 +36,7 @@ CLOUD_ENDPOINT_PATHS = {
 CLOUD_PROCESSES = ("gdecms", "saf", "appmgr", "cloudclient", "cloudclocal", "cloudclt")
 SMARTSWITCH_PATH = CLOUD_ENDPOINT_PATHS["smart_switch"]
 SMARTSWITCH_DISABLED_VALUE = "0"
+SMARTSWITCH_CONFIRMED_STORAGE_PATH = "/fhdata/sysinfo_conf"
 SMARTSWITCH_IMPACT = [
     "Blocks SAF/appframework cloud integration paths controlled by SmartSwitch.",
     "May affect operator cloud management features exposed through CloudPlat.",
@@ -159,6 +160,8 @@ def remote_plan(kind: str) -> dict[str, Any]:
                 "description": "Set SmartSwitch=0 to block SAF/appframework.",
                 "path": SMARTSWITCH_PATH,
                 "target_value": SMARTSWITCH_DISABLED_VALUE,
+                "confirmed_storage_path": SMARTSWITCH_CONFIRMED_STORAGE_PATH,
+                "storage_path_basis": "research_confirmed",
                 "impact": SMARTSWITCH_IMPACT,
                 "forbidden_changes": SMARTSWITCH_FORBIDDEN_CHANGES,
                 "device_write": True,
@@ -205,13 +208,27 @@ def tr069_randomize_connection_request(backend: CfgCmdBackend) -> dict[str, Any]
 
 
 def cloud_disable_cloudclt(shell_runner: Any) -> dict[str, Any]:
-    command = "cloudclt stop 2>/dev/null || /etc/init.d/cloudclt stop 2>/dev/null || true"
-    output = shell_runner(command)
+    commands = [
+        "lxc-attach -n saf -- /etc/init.d/cloudclt stop 2>&1 || true",
+        "lxc-attach -n saf -- /etc/init.d/cloudclt disable 2>&1 || true",
+    ]
+    command_results = [
+        {
+            "command": command,
+            "output": str(shell_runner(command)),
+        }
+        for command in commands
+    ]
     return {
         "action": "disable-cloudclt",
         "risk": "danger",
-        "command": command,
-        "output": str(output),
+        "target": {
+            "container": "saf",
+            "service": "cloudclt",
+        },
+        "command": " && ".join(commands),
+        "output": "\n".join(result["output"] for result in command_results),
+        "commands": command_results,
     }
 
 
@@ -226,6 +243,8 @@ def cloud_disable_smartswitch(backend: CfgCmdBackend) -> dict[str, Any]:
         "risk": "danger",
         "path": SMARTSWITCH_PATH,
         "target_value": SMARTSWITCH_DISABLED_VALUE,
+        "confirmed_storage_path": SMARTSWITCH_CONFIRMED_STORAGE_PATH,
+        "storage_path_basis": "research_confirmed",
         "impact": SMARTSWITCH_IMPACT,
         "forbidden_changes": SMARTSWITCH_FORBIDDEN_CHANGES,
         "write": {
@@ -258,6 +277,8 @@ def _smart_switch_status(status: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {
         "path": SMARTSWITCH_PATH,
         "disable_value": SMARTSWITCH_DISABLED_VALUE,
+        "confirmed_storage_path": SMARTSWITCH_CONFIRMED_STORAGE_PATH,
+        "storage_path_basis": "research_confirmed",
         "risk": "danger",
         "impact": SMARTSWITCH_IMPACT,
         "forbidden_changes": SMARTSWITCH_FORBIDDEN_CHANGES,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import re
 from typing import Any
 from urllib.parse import urljoin
@@ -11,6 +12,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 
 from ..errors import FHToolError
+from ..output import log_event
 
 DEFAULT_AJAX_PATH = "/cgi-bin/ajax"
 DEFAULT_WEB_LOGIN_PORT = "0"
@@ -65,10 +67,13 @@ class WebAjaxClient:
 
     def login_check(self) -> dict[str, Any]:
         url = self.base_url
+        log_event(logging.INFO, "web.login_check.start", base_url=self.base_url)
         try:
             response = self.session.get(url, timeout=self.timeout, allow_redirects=False)
         except requests.RequestException as exc:
+            log_event(logging.INFO, "web.login_check.error", base_url=self.base_url, error=str(exc))
             raise FHToolError(f"Web login-check failed {url}: {exc}") from exc
+        log_event(logging.INFO, "web.login_check.response", base_url=self.base_url, status_code=response.status_code)
         result = {
             "url": url,
             "status_code": response.status_code,
@@ -112,6 +117,7 @@ class WebAjaxClient:
         *,
         port: str = DEFAULT_WEB_LOGIN_PORT,
     ) -> dict[str, Any]:
+        log_event(logging.INFO, "web.login.start", base_url=self.base_url, username=username)
         brmad = self._fetch_brmad()
         self.ajax_get("get_operator", use_session=False)
         loginpd = fiberhome_web_encrypt(
@@ -128,10 +134,21 @@ class WebAjaxClient:
         )
         response = result.get("response")
         login_result = response.get("login_result") if isinstance(response, dict) else None
+        ok = result["ok"] and str(login_result) == "0"
+        log_event(
+            logging.INFO,
+            "web.login.response",
+            base_url=self.base_url,
+            username=username,
+            status_code=result["status_code"],
+            ok=ok,
+            login_result=login_result,
+            sessionid_present=bool(self.sessionid),
+        )
         return {
             "method": "do_login",
             "status_code": result["status_code"],
-            "ok": result["ok"] and str(login_result) == "0",
+            "ok": ok,
             "login_result": login_result,
             "username": username,
             "sessionid_present": bool(self.sessionid),
@@ -151,6 +168,14 @@ class WebAjaxClient:
             request_params.update(params)
         if use_session and self.sessionid:
             request_params.setdefault("sessionid", self.sessionid)
+        log_event(
+            logging.DEBUG,
+            "web.ajax.request",
+            base_url=self.base_url,
+            http_method="GET",
+            method=method,
+            sessionid_present=bool(request_params.get("sessionid")),
+        )
         try:
             response = self.session.get(
                 url,
@@ -159,6 +184,14 @@ class WebAjaxClient:
                 allow_redirects=False,
             )
         except requests.RequestException as exc:
+            log_event(
+                logging.INFO,
+                "web.ajax.error",
+                base_url=self.base_url,
+                http_method="GET",
+                method=method,
+                error=str(exc),
+            )
             raise FHToolError(f"Web AJAX GET failed {url}: {exc}") from exc
         return self._response_result("GET", url, method, response)
 
@@ -168,6 +201,14 @@ class WebAjaxClient:
         request_data["ajaxmethod"] = method
         if self.sessionid:
             request_data.setdefault("sessionid", self.sessionid)
+        log_event(
+            logging.DEBUG,
+            "web.ajax.request",
+            base_url=self.base_url,
+            http_method="POST",
+            method=method,
+            sessionid_present=bool(request_data.get("sessionid")),
+        )
         try:
             response = self.session.post(
                 url,
@@ -176,6 +217,14 @@ class WebAjaxClient:
                 allow_redirects=False,
             )
         except requests.RequestException as exc:
+            log_event(
+                logging.INFO,
+                "web.ajax.error",
+                base_url=self.base_url,
+                http_method="POST",
+                method=method,
+                error=str(exc),
+            )
             raise FHToolError(f"Web AJAX POST failed {url}: {exc}") from exc
         return self._response_result("POST", url, method, response)
 
@@ -319,6 +368,16 @@ class WebAjaxClient:
             "content_type": response.headers.get("Content-Type"),
             "sessionid_present": bool(self.sessionid),
         }
+        log_event(
+            logging.DEBUG,
+            "web.ajax.response",
+            base_url=self.base_url,
+            http_method=http_method,
+            method=method,
+            status_code=response.status_code,
+            ok=result["ok"],
+            sessionid_present=bool(self.sessionid),
+        )
         try:
             payload = response.json()
         except ValueError:

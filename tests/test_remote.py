@@ -7,6 +7,7 @@ from pathlib import Path
 from fh_tool_cli.backends.cfg_cmd import CfgCmdBackend
 from fh_tool_cli.remote import (
     CLOUD_ENDPOINT_PATHS,
+    SMARTSWITCH_CONFIRMED_STORAGE_PATH,
     SMARTSWITCH_FORBIDDEN_CHANGES,
     SMARTSWITCH_PATH,
     TR069_PATHS,
@@ -69,6 +70,8 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(smart_switch["path"], SMARTSWITCH_PATH)
         self.assertEqual(smart_switch["value"], "1")
         self.assertEqual(smart_switch["disable_value"], "0")
+        self.assertEqual(smart_switch["confirmed_storage_path"], SMARTSWITCH_CONFIRMED_STORAGE_PATH)
+        self.assertEqual(smart_switch["storage_path_basis"], "research_confirmed")
         self.assertEqual(smart_switch["risk"], "danger")
         self.assertIn("WAN VLAN", smart_switch["forbidden_changes"])
 
@@ -85,6 +88,8 @@ class RemoteTests(unittest.TestCase):
 
         self.assertEqual(smart_switch["path"], SMARTSWITCH_PATH)
         self.assertEqual(smart_switch["target_value"], "0")
+        self.assertEqual(smart_switch["confirmed_storage_path"], "/fhdata/sysinfo_conf")
+        self.assertEqual(smart_switch["storage_path_basis"], "research_confirmed")
         self.assertEqual(smart_switch["risk"], "danger")
         self.assertEqual(smart_switch["forbidden_changes"], SMARTSWITCH_FORBIDDEN_CHANGES)
 
@@ -136,11 +141,26 @@ class RemoteTests(unittest.TestCase):
 
     def test_cloud_disable_cloudclt_runs_gated_command(self) -> None:
         calls: list[str] = []
-        result = cloud_disable_cloudclt(calls.append)
+
+        def shell(command: str) -> str:
+            calls.append(command)
+            return f"ran: {command}"
+
+        result = cloud_disable_cloudclt(shell)
 
         self.assertEqual(result["risk"], "danger")
-        self.assertEqual(len(calls), 1)
-        self.assertIn("cloudclt stop", calls[0])
+        self.assertEqual(
+            calls,
+            [
+                "lxc-attach -n saf -- /etc/init.d/cloudclt stop 2>&1 || true",
+                "lxc-attach -n saf -- /etc/init.d/cloudclt disable 2>&1 || true",
+            ],
+        )
+        self.assertEqual(result["target"]["container"], "saf")
+        self.assertEqual(result["target"]["service"], "cloudclt")
+        self.assertEqual([entry["command"] for entry in result["commands"]], calls)
+        self.assertIn("ran: lxc-attach -n saf -- /etc/init.d/cloudclt stop", result["commands"][0]["output"])
+        self.assertIn("disable", result["commands"][1]["output"])
 
     def test_cloud_disable_smartswitch_uses_cfg_verify(self) -> None:
         values = {SMARTSWITCH_PATH: "1"}
@@ -161,6 +181,8 @@ class RemoteTests(unittest.TestCase):
 
         self.assertEqual(set_paths, [SMARTSWITCH_PATH])
         self.assertEqual(values[SMARTSWITCH_PATH], "0")
+        self.assertEqual(result["confirmed_storage_path"], SMARTSWITCH_CONFIRMED_STORAGE_PATH)
+        self.assertEqual(result["storage_path_basis"], "research_confirmed")
         self.assertTrue(result["verified"])
         self.assertEqual(result["write"]["risk"], "danger")
 

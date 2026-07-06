@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -8,7 +9,7 @@ from typing import Any, Callable
 import click
 
 from .errors import CliError, FHToolError
-from .output import configure_logging, emit, emit_cancelled, emit_error
+from .output import configure_logging, emit, emit_cancelled, emit_error, log_event
 from .parser import HandlerMap, build_parser
 
 
@@ -150,11 +151,7 @@ def _command_from_parser(
 def _parent_callback(fixed: dict[str, Any]) -> Callable[..., None]:
     @click.pass_context
     def callback(ctx: click.Context, **kwargs: Any) -> None:
-        configure_logging(
-            verbose=int(kwargs.pop("verbose", 0) or 0),
-            quiet=int(kwargs.pop("quiet", 0) or 0),
-            log_file=kwargs.pop("log_file", None),
-        )
+        _configure_logging_from_kwargs(kwargs)
         state = ctx.ensure_object(dict)
         state.update(fixed)
         state.update(_normalize_click_values(kwargs))
@@ -165,11 +162,7 @@ def _parent_callback(fixed: dict[str, Any]) -> Callable[..., None]:
 def _group_callback(parser: argparse.ArgumentParser, fixed: dict[str, Any]) -> Callable[..., int | None]:
     @click.pass_context
     def callback(ctx: click.Context, **kwargs: Any) -> int | None:
-        configure_logging(
-            verbose=int(kwargs.pop("verbose", 0) or 0),
-            quiet=int(kwargs.pop("quiet", 0) or 0),
-            log_file=kwargs.pop("log_file", None),
-        )
+        _configure_logging_from_kwargs(kwargs)
         state = ctx.ensure_object(dict)
         state.update(fixed)
         state.update(_normalize_click_values(kwargs))
@@ -191,6 +184,16 @@ def _leaf_callback(parser: argparse.ArgumentParser, fixed: dict[str, Any]) -> Ca
     return callback
 
 
+def _configure_logging_from_kwargs(kwargs: dict[str, Any]) -> None:
+    if not {"verbose", "quiet", "log_file"} & set(kwargs):
+        return
+    configure_logging(
+        verbose=int(kwargs.pop("verbose", 0) or 0),
+        quiet=int(kwargs.pop("quiet", 0) or 0),
+        log_file=kwargs.pop("log_file", None),
+    )
+
+
 def _run_parser_handler(parser: argparse.ArgumentParser, values: dict[str, Any]) -> int:
     args_values = dict(parser._defaults)
     args_values.update(values)
@@ -198,14 +201,28 @@ def _run_parser_handler(parser: argparse.ArgumentParser, values: dict[str, Any])
     if handler is None:
         raise FHToolClickError("missing command handler")
     args = SimpleNamespace(**args_values)
+    handler_name = getattr(handler, "__name__", handler.__class__.__name__)
+    command = _command_name(args_values)
 
     try:
+        log_event(logging.DEBUG, "cli.command.start", command=command, handler=handler_name)
         result = handler(args)
     except (argparse.ArgumentTypeError, CliError, FHToolError, ValueError) as exc:
+        log_event(logging.INFO, "cli.command.error", command=command, handler=handler_name, error=str(exc))
         raise FHToolClickError(str(exc)) from exc
 
     emit(result, bool(getattr(args, "json", False)))
+    log_event(logging.DEBUG, "cli.command.success", command=command, handler=handler_name)
     return 0
+
+
+def _command_name(values: dict[str, Any]) -> str:
+    parts = [
+        value
+        for key, value in values.items()
+        if key == "command" or key.endswith("_command")
+    ]
+    return " ".join(str(part) for part in parts if part) or "root"
 
 
 def _normalize_click_values(values: dict[str, Any]) -> dict[str, Any]:

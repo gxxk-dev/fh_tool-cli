@@ -11,6 +11,8 @@ import unittest
 from pathlib import Path
 
 from fh_tool_cli.backup import (
+    BACKUP_PATHS,
+    RESTORE_ALLOWLIST,
     create_backup,
     restore_backup_archive,
     restore_backup_to_device,
@@ -19,8 +21,32 @@ from fh_tool_cli.backup import (
 )
 from fh_tool_cli.errors import CliError
 
+RESEARCHED_READONLY_BACKUP_PATHS = {
+    "/fhconf/fhcfgmonitor.conf",
+    "/fhconf/fac_process_start_list",
+    "/fhconf/u_config_conf",
+    "/fhconf/process_monitor_list",
+    "/fhconf/normal_reboot_flag",
+    "/fhconf/crc_file",
+    "/fhconf/usrconfig_dl_conf",
+    "/fhconf/usrconfig_dl_flag",
+    "/fhconf/gdecms/gdecms_conf",
+    "/fhdata/tr069_control_conf",
+    "/fhdata/voice_digitmap_conf",
+    "/fhdata/factorymodeflag",
+    "/opt/upt/apps/info/reboot_info",
+    "/opt/upt/apps/info/crash_info",
+    "/opt/upt/apps/mtd.booting",
+    "/opt/upt/apps/upt.mtd",
+    "/opt/upt/apps/saf-upgradeinfo",
+}
+
 
 class BackupTests(unittest.TestCase):
+    def test_default_backup_includes_researched_readonly_paths_without_restore_allowing(self) -> None:
+        self.assertTrue(RESEARCHED_READONLY_BACKUP_PATHS.issubset(BACKUP_PATHS))
+        self.assertTrue(RESEARCHED_READONLY_BACKUP_PATHS.isdisjoint(RESTORE_ALLOWLIST))
+
     def test_create_backup_archive_and_verify_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "root"

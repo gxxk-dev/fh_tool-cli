@@ -36,6 +36,8 @@ fh-tool --log-file fh-tool.log dev-info
 
 `--json` 输出稳定的 machine-readable JSON，不混入日志或样式。当前默认人类输出仍保持 pretty JSON，以兼容已有脚本；后续可以在不影响 `--json` 的前提下逐步增加表格化输出。
 
+`--log-file` 写入 JSON lines 结构化日志；`-v/-vv` 控制 info/debug 事件，`-q` 只保留 error 级别。日志只记录 command、HTTP method、状态码、cfg path、风险等级等元数据，密码、session、token、LOID、PPPoE 等字段会脱敏。
+
 ## 快速配置
 
 保存默认 IP/MAC：
@@ -133,7 +135,7 @@ fh-tool wan list --backend local-vm
 
 `local-vm` 只是在本机 proot VM 内执行厂商 `cfg_cmd`。`--vm-root` 必须指向 VM 工作区目录，也就是包含 `bin/proot-shell` 和 `rootfs-vm/fhrom/bin/cfg_cmd` 的目录；默认是 `/mnt/dev-cold/HG5143F-ONU-vm`。不要把它指到里面的 `rootfs-vm/`。
 
-Web AJAX 读取命令只读。需要复用已有 Web session 时加 `--sessionid`；需要登录时可显式传 `--password-stdin` 或 `--password`。未显式提供密码时默认 `--username useradmin --password-source auto`，会依次尝试 `GetAdminAccount` 和 cfg 路径读取 Web superadmin 密码；cfg 来源需要 Telnet 时会默认使用 HG5143F 派生 Telnet 凭据 fallback，可用 `--no-derived-credentials` 关闭。失败不会阻塞只读抓取。sessionid、密码、LOID、PPPoE 等敏感字段默认会脱敏；只有显式加 `--reveal-secrets` 才输出明文。
+Web AJAX 读取命令只读。需要复用已有 Web session 时加 `--sessionid`；需要登录时可显式传 `--password-stdin` 或 `--password`。未显式提供密码时默认 `--username useradmin --password-source auto`，会依次尝试 `GetAdminAccount` 和 cfg 路径读取 Web superadmin 密码；cfg 来源需要 Telnet 时会默认使用 HG5143F 派生 Telnet 凭据 fallback，可用 `--no-derived-credentials` 关闭。失败不会阻塞只读抓取，并会在结果里返回脱敏 login summary。sessionid、密码、LOID、PPPoE 等敏感字段默认会脱敏；只有显式加 `--reveal-secrets` 才输出明文。
 
 后台 AJAX 接口发现以 live discovery 为主路径，不需要 HAR，也不需要 rootfs：
 
@@ -158,6 +160,8 @@ fh-tool web services set --service telnet --enabled 0 --confirm
 
 常规 Web 写接口优先使用 typed 参数。`web ajax post` 和 `web ajax replay` 支持任意已知或未知 AJAX method，默认只输出计划，不发 POST；执行必须加 `--confirm`，且默认拒绝空 payload。`--json-payload` 和可重复的 `--param k=v` 仍保留为固件差异逃生口，合并顺序是 typed 参数、JSON、最后 `--param` 覆盖。旧的确认参数会直接报弃用错误。
 
+Web AJAX 写命令 dry-run 不会登录；加 `--confirm` 后，如果没有显式 `--sessionid`，会要求自动登录成功后才发 POST。
+
 Telnet/cfg/诊断命令在未显式传 Telnet 密码时，会默认使用 HG5143F 派生 Telnet 凭据 fallback；显式传入的用户名/密码始终优先。如果设备不是该规则，或需要保留空凭据/自定义认证，可加 `--no-derived-credentials` 关闭。`--use-derived-credentials` 仍作为兼容参数接受：
 
 ```bash
@@ -165,6 +169,8 @@ fh-tool cfg get InternetGatewayDevice.DeviceInfo.Manufacturer
 fh-tool wan list
 fh-tool cfg get InternetGatewayDevice.DeviceInfo.Manufacturer --no-derived-credentials
 ```
+
+需要 root shell 的 Telnet 操作会自动执行 `su root`，当前 su 密码默认按 HG5143F 规则从 MAC 派生；如果 runtime su 密码已经被你改过，可显式传 `--su-password` 或 `--su-password-stdin`。例如 device restore、`cloud disable-cloudclt --confirm`、`account set-su-runtime-password --confirm` 会走 root runner。`account set-su-runtime-password` 写入的是 `/var/telsu` 的 passwd 格式 md5-crypt 行，不会把明文密码写入远端命令。
 
 诊断命令保持只读；`ip status` 这类依赖 VM/userspace 工具的命令会分别标记每个 probe 的 `ok/output/error`，工具缺失时输出 `partial_failure=true`，不会吞掉其它已成功字段。
 
@@ -210,6 +216,8 @@ fh-tool restore backup.tgz \
 
 当前 restore 只恢复 allowlist 内的配置文件，且会拒绝路径穿越、绝对路径逃逸和未知文件写入。`/proc/mtd`、runtime password 文件、restore/factory reset flag 等备份内容不会被恢复。恢复后会 read-back/hash verify；不会自动 reboot，也不会自动 factory reset。
 
+默认备份清单包含调研确认的 `/fhconf`、`/fhdata`、runtime password、CloudPlat/appframework 状态和 boot/app 信息等只读路径；这些新增调研路径不会自动加入 restore allowlist。
+
 ## CloudPlat / SmartSwitch
 
 CloudPlat 默认先做只读审计和计划：
@@ -227,6 +235,14 @@ fh-tool cloud disable-smartswitch --confirm
 ```
 
 该命令不会修改 LOID、PON、WAN VLAN、ServiceList 或 TR-069 VLAN。
+
+只停 CloudPlat 连接优先使用 SAF container 内的 `cloudclt` init 脚本：
+
+```bash
+fh-tool cloud disable-cloudclt --confirm
+```
+
+该命令通过 `lxc-attach -n saf -- /etc/init.d/cloudclt stop/disable` 执行，需要 root runner；仍然不会 patch 启动脚本或删除 package。
 
 ## 22 个 `/fh_tool/api` method 覆盖
 

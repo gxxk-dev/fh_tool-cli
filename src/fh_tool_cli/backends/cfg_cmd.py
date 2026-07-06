@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shlex
 from collections.abc import Callable
@@ -8,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..errors import CliError
+from ..output import log_event
 
 DANGER_CFG_PATH_RE = re.compile(
     r"(tr-?069|wan|pon|loid|vlan|preconfig|servicelist|smartswitch|cloudplat)",
@@ -57,13 +59,23 @@ class CfgCmdBackend:
         self.expensive_missing_paths = expensive_missing_paths
 
     def get(self, path: str) -> str:
-        return parse_cfg_get_output(path, self._runner(_cfg_command("get", path)))
+        log_event(logging.DEBUG, "cfg.get.start", path=path, risk=cfg_read_risk(path))
+        output = self._runner(_cfg_command("get", path))
+        value = parse_cfg_get_output(path, output)
+        log_event(logging.DEBUG, "cfg.get.success", path=path, risk=cfg_read_risk(path), empty=not bool(value))
+        return value
 
     def set(self, path: str, value: str) -> str:
-        return self._runner(_cfg_command("set", path, value))
+        log_event(logging.INFO, "cfg.set.start", path=path, risk=cfg_path_risk(path))
+        result = self._runner(_cfg_command("set", path, value))
+        log_event(logging.INFO, "cfg.set.success", path=path, risk=cfg_path_risk(path))
+        return result
 
     def attr(self, path: str) -> str:
-        return self._runner(_cfg_command("attr", path)).strip()
+        log_event(logging.DEBUG, "cfg.attr.start", path=path, risk=cfg_read_risk(path))
+        result = self._runner(_cfg_command("attr", path)).strip()
+        log_event(logging.DEBUG, "cfg.attr.success", path=path, risk=cfg_read_risk(path), empty=not bool(result))
+        return result
 
 
 def cfg_set_with_verify(backend: CfgCmdBackend, path: str, value: str) -> dict[str, Any]:

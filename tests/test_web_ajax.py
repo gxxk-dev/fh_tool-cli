@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import unittest
 from unittest.mock import patch
 
@@ -9,7 +8,7 @@ from fh_tool_cli.backends.web_ajax import (
     WebAjaxClient,
     web_login_key_from_brmad,
 )
-from fh_tool_cli.cli import command_web_diagnostics_show
+from fh_tool_cli.cli import command_web_diagnostics_show, parse_args
 from fh_tool_cli.errors import FHToolError
 
 
@@ -85,6 +84,49 @@ class FakeSession:
         if isinstance(data, dict) and data.get("ajaxmethod") == "set_services":
             return FakeResponse(payload={"result": "ok"})
         return FakeResponse(text="ok")
+
+
+class RecordingReadClient:
+    def __init__(self, sessionid: str | None = None, login_error: Exception | None = None) -> None:
+        self.sessionid = sessionid
+        self.login_error = login_error
+        self.calls: list[tuple[str, object]] = []
+
+    def login(self, username: str, password: str, *, port: str) -> dict[str, object]:
+        self.calls.append(("login", (username, password, port)))
+        if self.login_error:
+            raise self.login_error
+        self.sessionid = "sid-after-login"
+        return {
+            "ok": True,
+            "username": username,
+            "login_result": 0,
+            "sessionid_present": True,
+        }
+
+    def ajax_get(self, method: str) -> dict[str, object]:
+        self.calls.append(("ajax_get", method))
+        return {
+            "method": method,
+            "status_code": 200,
+            "ok": True,
+            "content_type": "application/json",
+            "sessionid_present": bool(self.sessionid),
+            "response": {"value": "ok"},
+        }
+
+    def typed(self, group: str, action: str) -> dict[str, object]:
+        self.calls.append(("typed", (group, action)))
+        return {
+            "group": group,
+            "action": action,
+            "method": "get_allwan_info",
+            "status_code": 200,
+            "ok": True,
+            "sessionid_present": bool(self.sessionid),
+            "data": [],
+            "raw": {},
+        }
 
 
 class WebAjaxTests(unittest.TestCase):
@@ -281,27 +323,147 @@ class WebAjaxTests(unittest.TestCase):
             "*$abcdefghijkl#&",
         )
 
-    def test_web_diagnostics_show_collects_views_and_partial_failures(self) -> None:
-        fake_client = FakeDiagnosticsClient()
-        args = argparse.Namespace(
-            view=["wan", "firewall"],
-            username=None,
-            password=None,
-            password_stdin=False,
+    def test_ajax_get_defaults_to_auto_login_and_attaches_summary(self) -> None:
+        client = RecordingReadClient()
+        args = parse_args(["web", "ajax", "get", "get_base_info", "--ip", "192.168.1.1"])
+
+        with (
+            patch("fh_tool_cli.commands.web._web_client_from_args", return_value=client),
+            patch("fh_tool_cli.commands.web._web_password_from_args", return_value=("auto-secret", "cfg", [])),
+        ):
+            result = args.handler(args)
+
+        self.assertEqual(
+            client.calls,
+            [
+                ("login", ("useradmin", "auto-secret", "0")),
+                ("ajax_get", "get_base_info"),
+            ],
+        )
+        self.assertEqual(result["login"]["password_source"], "cfg")
+        self.assertTrue(result["login"]["ok"])
+        self.assertNotIn("auto-secret", str(result))
+
+    def test_typed_read_defaults_to_auto_login(self) -> None:
+        client = RecordingReadClient()
+        args = parse_args(["web", "wan", "list", "--ip", "192.168.1.1"])
+
+        with (
+            patch("fh_tool_cli.commands.web._web_client_from_args", return_value=client),
+            patch("fh_tool_cli.commands.web._web_password_from_args", return_value=("auto-secret", "admin-account", [])),
+        ):
+            result = args.handler(args)
+
+        self.assertEqual(
+            client.calls,
+            [
+                ("login", ("useradmin", "auto-secret", "0")),
+                ("typed", ("wan", "list")),
+            ],
+        )
+        self.assertEqual(result["login"]["password_source"], "admin-account")
+        self.assertTrue(result["login"]["ok"])
+
+    def test_ajax_get_auto_login_failure_does_not_block_read(self) -> None:
+        client = RecordingReadClient()
+        args = parse_args(["web", "ajax", "get", "get_base_info", "--ip", "192.168.1.1"])
+
+        with (
+            patch("fh_tool_cli.commands.web._web_client_from_args", return_value=client),
+            patch(
+                "fh_tool_cli.commands.web._web_password_from_args",
+                return_value=(None, "auto", ["admin-account: missing"]),
+            ),
+        ):
+            result = args.handler(args)
+
+        self.assertEqual(client.calls, [("ajax_get", "get_base_info")])
+        self.assertEqual(result["method"], "get_base_info")
+        self.assertFalse(result["login"]["attempted"])
+        self.assertIn("admin-account: missing", result["login"]["error"])
+
+    def test_ajax_get_login_error_does_not_block_read(self) -> None:
+        client = RecordingReadClient(login_error=FHToolError("login surface unavailable"))
+        args = parse_args(["web", "ajax", "get", "get_base_info", "--ip", "192.168.1.1"])
+
+        with (
+            patch("fh_tool_cli.commands.web._web_client_from_args", return_value=client),
+            patch("fh_tool_cli.commands.web._web_password_from_args", return_value=("auto-secret", "cfg", [])),
+        ):
+            result = args.handler(args)
+
+        self.assertEqual(
+            client.calls,
+            [
+                ("login", ("useradmin", "auto-secret", "0")),
+                ("ajax_get", "get_base_info"),
+            ],
+        )
+        self.assertFalse(result["login"]["ok"])
+        self.assertIn("login surface unavailable", result["login"]["error"])
+
+    def test_explicit_sessionid_skips_auto_login(self) -> None:
+        client = RecordingReadClient(sessionid="sid-explicit")
+        args = parse_args(
+            [
+                "web",
+                "ajax",
+                "get",
+                "get_base_info",
+                "--sessionid",
+                "sid-explicit",
+                "--ip",
+                "192.168.1.1",
+            ]
         )
 
-        with patch("fh_tool_cli.commands.web._web_client_from_args", return_value=fake_client):
+        with (
+            patch("fh_tool_cli.commands.web._web_client_from_args", return_value=client),
+            patch("fh_tool_cli.commands.web._web_password_from_args", side_effect=AssertionError("password used")),
+        ):
+            result = args.handler(args)
+
+        self.assertEqual(client.calls, [("ajax_get", "get_base_info")])
+        self.assertFalse(result["login"]["attempted"])
+        self.assertEqual(result["login"]["password_source"], "sessionid")
+        self.assertTrue(result["login"]["sessionid_present"])
+
+    def test_web_diagnostics_show_collects_views_and_partial_failures(self) -> None:
+        fake_client = FakeDiagnosticsClient()
+        args = parse_args(
+            [
+                "web",
+                "diagnostics",
+                "show",
+                "--view",
+                "wan",
+                "--view",
+                "firewall",
+                "--ip",
+                "192.168.1.1",
+            ]
+        )
+
+        with (
+            patch("fh_tool_cli.commands.web._web_client_from_args", return_value=fake_client),
+            patch(
+                "fh_tool_cli.commands.web._web_password_from_args",
+                return_value=(None, "auto", ["admin-account: missing"]),
+            ),
+        ):
             result = command_web_diagnostics_show(args)
 
         diagnostics = result["web_diagnostics"]
         self.assertIn("wan", diagnostics["views"])
         self.assertEqual(diagnostics["errors"], {"firewall": "firewall unavailable"})
         self.assertTrue(diagnostics["partial_failure"])
-        self.assertTrue(diagnostics["sessionid_present"])
+        self.assertFalse(diagnostics["sessionid_present"])
+        self.assertFalse(diagnostics["login"]["attempted"])
+        self.assertIn("admin-account: missing", diagnostics["login"]["error"])
 
 
 class FakeDiagnosticsClient:
-    sessionid = "sid"
+    sessionid = None
 
     def typed(self, group: str, action: str) -> dict[str, object]:
         if group == "firewall":

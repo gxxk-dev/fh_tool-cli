@@ -3,7 +3,9 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from fh_tool_cli import cli
 
@@ -66,6 +68,25 @@ class ClickCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(stderr.getvalue(), "")
         self.assertIn("Usage: fh-tool", stdout.getvalue())
+
+    def test_log_file_uses_structured_json_without_polluting_stdout(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_file = Path(temp_dir) / "fh-tool.log"
+
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                exit_code = cli.main(["-vv", "--log-file", str(log_file), "config", "show", "--json"])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertIn("config", payload)
+            lines = log_file.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(lines)
+            first = json.loads(lines[0])
+            self.assertIn("timestamp", first)
+            self.assertIn("event", first)
+            self.assertEqual(first["logger"], "fh_tool_cli")
 
 
 if __name__ == "__main__":

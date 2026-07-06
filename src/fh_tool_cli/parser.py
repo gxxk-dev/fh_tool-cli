@@ -125,6 +125,8 @@ def add_telnet_options(
         action="store_true",
         help="关闭默认 HG5143F 派生 Telnet 凭据 fallback",
     )
+    parser.add_argument("--su-password", help="当前 su root 密码；未提供时默认使用 HG5143F 派生候选")
+    parser.add_argument("--su-password-stdin", action="store_true", help="从 stdin 读取当前 su root 密码")
 
 
 def add_cfg_backend_options(parser: argparse.ArgumentParser) -> None:

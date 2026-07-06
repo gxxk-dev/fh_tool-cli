@@ -100,12 +100,7 @@ class AccountTests(unittest.TestCase):
             ]
         )
 
-        class FakeShell:
-            def run(self, command: str) -> str:
-                calls.append(command)
-                return "ok"
-
-        with patch("fh_tool_cli.cli._telnet_shell_from_args", return_value=FakeShell()):
+        with patch("fh_tool_cli.cli._telnet_root_shell_runner_from_args", return_value=calls.append):
             result = args.handler(args)
 
         self.assertEqual(result["password_source"], "derived-hg5143f-su")
