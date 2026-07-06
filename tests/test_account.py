@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from fh_tool_cli.account import (
+    SU_RUNTIME_PASSWORD_FILE,
     TELNET_PASSWORD_PATH,
     WEB_ADMIN_PASSWORD_PATH,
     account_show,
@@ -14,8 +15,10 @@ from fh_tool_cli.account import (
 )
 from fh_tool_cli.backends.cfg_cmd import CfgCmdBackend
 from fh_tool_cli.cli import parse_args
-from fh_tool_cli.credentials import HG5143F_SU_PASSWORD_PREFIX
 from fh_tool_cli.errors import CliError
+
+HG5143F_DERIVED_SU_PASSWORD = "Fh@36BC10"
+HG5143F_DERIVED_SU_MD5_CRYPT = "$1$$c29kb1Alc4Ic54TuMH2iv."
 
 
 class AccountTests(unittest.TestCase):
@@ -66,13 +69,22 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(result["value"], "[REDACTED]")
         self.assertEqual(result["observed"], "[REDACTED]")
 
-    def test_set_su_runtime_password_does_not_return_plaintext(self) -> None:
+    def test_set_su_runtime_password_writes_md5_crypt_passwd_line(self) -> None:
         calls: list[str] = []
-        result = set_su_runtime_password(calls.append, "runtime-secret")
+        result = set_su_runtime_password(calls.append, HG5143F_DERIVED_SU_PASSWORD)
 
         self.assertEqual(result["value"], "[REDACTED]")
+        self.assertEqual(result["path"], SU_RUNTIME_PASSWORD_FILE)
         self.assertFalse(result["persistent"])
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            calls,
+            [
+                "printf '%s\\n' "
+                "'root:$1$$c29kb1Alc4Ic54TuMH2iv.:0:0:Telnet user:/:/bin/ash' "
+                "> /var/telsu"
+            ],
+        )
+        self.assertNotIn(HG5143F_DERIVED_SU_PASSWORD, calls[0])
 
     def test_set_su_runtime_password_uses_derived_default(self) -> None:
         calls: list[str] = []
@@ -98,8 +110,8 @@ class AccountTests(unittest.TestCase):
 
         self.assertEqual(result["password_source"], "derived-hg5143f-su")
         self.assertEqual(result["value"], "[REDACTED]")
-        self.assertIn(HG5143F_SU_PASSWORD_PREFIX, calls[0])
-        self.assertIn("36BC10", calls[0])
+        self.assertIn(HG5143F_DERIVED_SU_MD5_CRYPT, calls[0])
+        self.assertNotIn(HG5143F_DERIVED_SU_PASSWORD, calls[0])
 
     def test_set_su_runtime_password_dry_run_mentions_derived_default(self) -> None:
         args = parse_args(
