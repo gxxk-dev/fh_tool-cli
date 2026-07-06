@@ -135,6 +135,18 @@ fh-tool wan list --backend local-vm
 
 `local-vm` 只是在本机 proot VM 内执行厂商 `cfg_cmd`。`--vm-root` 必须指向 VM 工作区目录，也就是包含 `bin/proot-shell` 和 `rootfs-vm/fhrom/bin/cfg_cmd` 的目录；默认是 `/mnt/dev-cold/HG5143F-ONU-vm`。不要把它指到里面的 `rootfs-vm/`。
 
+也可以从 HG5143F 原始 MTD dump 构建同类 userspace VM。`collect` 默认只输出 dry-run 计划，不读 flash；真正采集必须加 `--confirm`，自动开启 Telnet 也必须显式加 `--auto-enable-telnet --confirm`：
+
+```bash
+fh-tool vm collect --ip 192.168.1.1 --output ./hg5143f-dumps
+fh-tool vm collect --ip 192.168.1.1 --output ./hg5143f-dumps --auto-enable-telnet --confirm
+fh-tool vm build --dump-dir ./hg5143f-dumps --output ./HG5143F-ONU-vm
+fh-tool vm verify --vm-root ./HG5143F-ONU-vm
+fh-tool vm verify --vm-root ./HG5143F-ONU-vm --with-fhapi --with-http
+```
+
+`vm build` 需要 `ubireader_extract_images`、`ubireader_extract_files`、`unsquashfs`、`jefferson`、`qemu-arm-static` 和 `proot`。输出目录会包含 `rootfs-vm/`、`source/`、`logs/`、`bin/`、`build-manifest.json`、`verify-manifest.json` 和 `events.ndjson`。生成的 VM 是 32-bit ARM userspace under `qemu-arm-static`/`proot -0`，不是完整板级 QEMU 启动；默认不会运行完整 `/etc/rc.d/rcS`。
+
 Web AJAX 读取命令只读。需要复用已有 Web session 时加 `--sessionid`；需要登录时可显式传 `--password-stdin` 或 `--password`。未显式提供密码时默认 `--username useradmin --password-source auto`，会依次尝试 `GetAdminAccount` 和 cfg 路径读取 Web superadmin 密码；cfg 来源需要 Telnet 时会默认使用 HG5143F 派生 Telnet 凭据 fallback，可用 `--no-derived-credentials` 关闭。失败不会阻塞只读抓取，并会在结果里返回脱敏 login summary。sessionid、密码、LOID、PPPoE 等敏感字段默认会脱敏；只有显式加 `--reveal-secrets` 才输出明文。
 
 后台 AJAX 接口发现以 live discovery 为主路径，不需要 HAR，也不需要 rootfs：
