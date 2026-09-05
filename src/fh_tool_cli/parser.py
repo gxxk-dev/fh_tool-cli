@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .argparse_utils import normalize_port
 from .backends.local_vm import DEFAULT_VM_ROOT
 from .backup import DEFAULT_DEVICE_RESTORE_CHUNK_SIZE, DEFAULT_DEVICE_RESTORE_TMPDIR
 from .commands.web import register_web_commands
@@ -33,6 +34,12 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=5.0,
         help="HTTP/TCP timeout 秒数，默认 5",
+    )
+    parser.add_argument(
+        "--fh-port",
+        type=normalize_port,
+        default=None,
+        help="fh_tool API 端口；默认先 8080，TCP 不可达时自动探测候选端口（如 80）。显式指定后跳过探测",
     )
     parser.add_argument(
         "--config",

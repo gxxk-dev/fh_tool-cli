@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 import requests
 
 from .errors import FHToolError
+from .fh_endpoints import DEFAULT_FH_TOOL_PORT
 from .output import log_event
 
 
@@ -23,14 +24,21 @@ def tcp_open(ip: str, port: int, timeout: float) -> bool:
         return False
 
 
-def make_download_url(ip: str, value: str) -> str:
+def make_download_url(ip: str, value: str, port: int = DEFAULT_FH_TOOL_PORT) -> str:
     if value.startswith("http://") or value.startswith("https://"):
         return value
-    return urljoin(f"http://{ip}:8080", value)
+    return urljoin(f"http://{ip}:{port}", value)
 
 
-def download_to_file(ip: str, url_value: str, output: Path, timeout: float) -> dict[str, Any]:
-    url = make_download_url(ip, url_value)
+def download_to_file(
+    ip: str,
+    url_value: str,
+    output: Path,
+    timeout: float,
+    *,
+    port: int = DEFAULT_FH_TOOL_PORT,
+) -> dict[str, Any]:
+    url = make_download_url(ip, url_value, port)
     log_event(logging.INFO, "download.start", url=url, output=str(output))
     try:
         response = requests.get(url, timeout=timeout, stream=True)

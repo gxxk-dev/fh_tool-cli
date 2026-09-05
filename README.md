@@ -66,11 +66,12 @@ fh-tool dev-info --ip 192.168.1.1 --mac AABBCCDDEEFF
 
 ## 常用命令
 
-低风险 probe：
+低风险 probe（输出 `fh_port`/`fh_port_source` 与各候选端口 `fh_ports` 明细，可用于诊断 fh_tool API 所在端口）：
 
 ```bash
 fh-tool probe
 fh-tool probe --json
+fh-tool probe --fh-port 80
 ```
 
 读取设备信息：
@@ -112,6 +113,29 @@ fh-tool telnet enable --confirm
 ```bash
 fh-tool ports --ports 23,80,443,8080
 ```
+
+## fh_tool 端口与型号/固件兼容性
+
+不同型号/固件的 fh_tool 后端监听端口可能不同。大多数固件在 `8080`，但例如 **HG6142A3（固件 V03.00.M0000）** 的 fh_tool API 位于 `http://192.168.1.1:80/fh_tool/api`（80 端口）。
+
+工具默认行为：
+
+1. 先尝试默认端口 `8080`；
+2. 仅当 `8080` TCP 不可达时，自动探测候选端口（当前为 `80`，用 `GetDevInfo` / HTTP surface 验证），并在结果 JSON 的 `fh_port`/`fh_port_source` 字段中说明最终使用的端口和来源（`argument`/`default`/`auto_detected`/`default_unverified`）；
+3. 探测失败时沿用 `8080` 并在错误信息中给出引导。
+
+也可以显式指定端口（跳过探测）：
+
+```bash
+fh-tool dev-info --fh-port 80
+fh-tool call --func GetDevInfo --fh-port 80
+```
+
+已知局限：
+
+- 如果 `8080` 与 `80` 同时 TCP 开放、但 fh_tool API 只在 `80`，TCP 快筛会停留在 `8080` 并以 HTTP/解密错误失败，此时需要 `--fh-port 80` 显式指定；`fh-tool probe --json` 的 `fh_ports` 字段可以诊断这种场景。
+- 设备返回的绝对下载 URL（含端口）按原样使用，不会重写端口。
+- `HTTP 4xx/5xx`、解密失败不会触发端口切换——那说明 8080 上有 HTTP 服务，问题在路径/协议/MAC 而非端口。
 
 ## 本地 VM 测试环境
 

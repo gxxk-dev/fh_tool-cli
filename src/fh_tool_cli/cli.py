@@ -21,9 +21,13 @@ from .argparse_utils import parse_json_object, parse_kv, parse_ports
 from .backends.fh_tool import (
     FH_TOOL_API_PATH,
     FH_TOOL_UPLOAD_PATH,
+    TOOL_DOWNLOAD_PATH,
     api_payload,
     call_method,
     fh_tool_call,
+    fh_tool_url,
+    probe_fh_port_candidates,
+    resolve_fh_port,
     response_download_url,
 )
 from .backup import (
@@ -184,6 +188,7 @@ def command_probe(args: argparse.Namespace) -> dict[str, Any]:
     ip, ip_source = resolve_ip(args)
     mac, mac_source = resolve_mac(args, ip, required=False, allow_prompt=False)
     ports = parse_ports(args.ports)
+    fh_port, fh_port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout)
 
     result: dict[str, Any] = {
         "mode": "probe",
@@ -191,13 +196,16 @@ def command_probe(args: argparse.Namespace) -> dict[str, Any]:
         "ip_source": ip_source,
         "mac": format_mac(mac) if mac else None,
         "mac_source": mac_source,
+        "fh_port": fh_port,
+        "fh_port_source": fh_port_source,
         "tcp": {str(port): tcp_open(ip, port, args.timeout) for port in ports},
         "surface": {},
         "fh_tool_probe": None,
+        "fh_ports": probe_fh_port_candidates(ip, mac, args.timeout),
     }
 
-    for path in [FH_TOOL_API_PATH, FH_TOOL_UPLOAD_PATH, "/fh_tool/tool_download"]:
-        url = f"http://{ip}:8080{path}"
+    for path in [FH_TOOL_API_PATH, FH_TOOL_UPLOAD_PATH, TOOL_DOWNLOAD_PATH]:
+        url = fh_tool_url(ip, fh_port, path)
         try:
             response = requests.get(url, timeout=args.timeout, allow_redirects=False)
             result["surface"][path] = {
@@ -214,6 +222,7 @@ def command_probe(args: argparse.Namespace) -> dict[str, Any]:
                 mac,
                 api_payload("GetDevInfo"),
                 args.timeout,
+                port=fh_port,
             )
             result["fh_tool_probe"] = {
                 "func": "GetDevInfo",
@@ -810,6 +819,7 @@ def command_log_download(args: argparse.Namespace) -> dict[str, Any]:
             url_value,
             Path(args.output).expanduser(),
             args.timeout,
+            port=result["fh_port"],
         )
     return result
 
@@ -851,7 +861,7 @@ def command_download_file(args: argparse.Namespace) -> dict[str, Any]:
         output = Path(args.output).expanduser()
     else:
         output = Path.cwd() / Path(url_value.split("?", 1)[0]).name
-    result["download"] = download_to_file(result["ip"], url_value, output, args.timeout)
+    result["download"] = download_to_file(result["ip"], url_value, output, args.timeout, port=result["fh_port"])
     return result
 
 
@@ -983,14 +993,19 @@ def command_raw_call(args: argparse.Namespace) -> dict[str, Any]:
 
 def command_download_url(args: argparse.Namespace) -> dict[str, Any]:
     ip, ip_source = resolve_ip(args)
+    mac, _mac_source = resolve_mac(args, ip, required=False, allow_prompt=False)
+    fh_port, fh_port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout)
     return {
         "ip": ip,
         "ip_source": ip_source,
+        "fh_port": fh_port,
+        "fh_port_source": fh_port_source,
         "download": download_to_file(
             ip,
             args.url,
             Path(args.output).expanduser(),
             args.timeout,
+            port=fh_port,
         ),
     }
 
@@ -998,6 +1013,8 @@ def command_download_url(args: argparse.Namespace) -> dict[str, Any]:
 def command_upload(args: argparse.Namespace) -> dict[str, Any]:
     dry_run = not is_confirmed(args)
     ip, ip_source = resolve_ip(args)
+    mac, _mac_source = resolve_mac(args, ip, required=False, allow_prompt=False)
+    fh_port, fh_port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout)
     file_path = Path(args.file).expanduser()
     result = upload_file(
         ip=ip,
@@ -1005,9 +1022,12 @@ def command_upload(args: argparse.Namespace) -> dict[str, Any]:
         file_path=file_path,
         sessionid=args.sessionid,
         timeout=args.timeout,
+        port=fh_port,
         dry_run=dry_run,
     )
     result["ip_source"] = ip_source
+    result["fh_port"] = fh_port
+    result["fh_port_source"] = fh_port_source
     if dry_run:
         _attach_dry_run_notice(result)
     return result

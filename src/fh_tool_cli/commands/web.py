@@ -10,7 +10,7 @@ from typing import Any
 from ..account import WEB_ADMIN_PASSWORD_PATH
 from ..argparse_utils import parse_json_object, parse_kv
 from ..backends.cfg_cmd import CfgCmdBackend
-from ..backends.fh_tool import api_payload, fh_tool_call
+from ..backends.fh_tool import api_payload, fh_tool_call, resolve_fh_port
 from ..backends.local_vm import DEFAULT_VM_ROOT, LocalVmShell
 from ..backends.telnet import TelnetCredentials, TelnetShell
 from ..backends.web_ajax import DEFAULT_AJAX_PATH, DEFAULT_WEB_LOGIN_PORT, WebAjaxClient
@@ -182,7 +182,8 @@ def _web_password_from_admin_account(args: argparse.Namespace) -> str:
     ip, _ip_source = resolve_ip(args)
     mac, _mac_source = resolve_mac(args, ip, required=True, allow_prompt=True)
     assert mac is not None
-    result = fh_tool_call(ip, mac, api_payload("GetAdminAccount"), args.timeout)
+    fh_port, _fh_port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout)
+    result = fh_tool_call(ip, mac, api_payload("GetAdminAccount"), args.timeout, port=fh_port)
     password = _extract_password_from_mapping(result)
     if not password:
         raise FHToolError("GetAdminAccount 响应中没有可用 password 字段")

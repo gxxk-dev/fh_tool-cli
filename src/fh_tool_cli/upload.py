@@ -10,6 +10,7 @@ import requests
 
 from .backends.fh_tool import FH_TOOL_UPLOAD_PATH
 from .errors import CliError
+from .fh_endpoints import DEFAULT_FH_TOOL_PORT
 
 UPLOAD_ACTIONS = {"upgradeimage", "preconfig"}
 REDACTED = "[REDACTED]"
@@ -37,11 +38,12 @@ def upload_file(
     file_path: Path,
     sessionid: str,
     timeout: float,
+    port: int = DEFAULT_FH_TOOL_PORT,
     dry_run: bool = False,
     post: Callable[..., Any] = requests.post,
 ) -> dict[str, Any]:
     file_info = _validate_upload_inputs(action, file_path, sessionid)
-    url = f"http://{ip}:8080{FH_TOOL_UPLOAD_PATH}?action={action}"
+    url = f"http://{ip}:{port}{FH_TOOL_UPLOAD_PATH}?action={action}"
     base = _upload_result_base(
         ip=ip,
         url=url,

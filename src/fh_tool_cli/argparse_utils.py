@@ -25,6 +25,16 @@ def parse_ports(value: str) -> list[int]:
     return ports
 
 
+def normalize_port(value: str) -> int:
+    try:
+        port = int(value, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"不符规范的 port: {value}") from exc
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"port 超出范围: {value}")
+    return port
+
+
 def parse_scalar(value: str) -> Any:
     lowered = value.lower()
     if lowered == "true":
