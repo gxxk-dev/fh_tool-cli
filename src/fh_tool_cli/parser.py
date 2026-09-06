@@ -6,12 +6,13 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .argparse_utils import normalize_port
+from .argparse_utils import normalize_path, normalize_port
 from .backends.local_vm import DEFAULT_VM_ROOT
 from .backup import DEFAULT_DEVICE_RESTORE_CHUNK_SIZE, DEFAULT_DEVICE_RESTORE_TMPDIR
 from .commands.web import register_web_commands
 from .config_store import DEFAULT_CONFIG_PATH, normalize_ip
 from .credentials import DERIVED_CREDENTIAL_KINDS
+from .fh_endpoints import FH_TOOL_API_PATH, FH_TOOL_UPLOAD_PATH, TOOL_DOWNLOAD_PATH
 from .upload import UPLOAD_ACTIONS
 
 DEFAULT_PORTS = "23,80,443,8080"
@@ -40,6 +41,24 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
         type=normalize_port,
         default=None,
         help="fh_tool API 端口；默认先 8080，TCP 不可达时自动探测候选端口（如 80）。显式指定后跳过探测",
+    )
+    parser.add_argument(
+        "--fh-api-path",
+        type=normalize_path,
+        default=None,
+        help=f"fh_tool RPC 路径，默认 {FH_TOOL_API_PATH}",
+    )
+    parser.add_argument(
+        "--fh-upload-path",
+        type=normalize_path,
+        default=None,
+        help=f"fh_tool 上传路径，默认 {FH_TOOL_UPLOAD_PATH}",
+    )
+    parser.add_argument(
+        "--fh-download-path",
+        type=normalize_path,
+        default=None,
+        help=f"fh_tool 下载路径，默认 {TOOL_DOWNLOAD_PATH}；仅影响 probe surface 检查，实际下载以设备返回 URL 为准",
     )
     parser.add_argument(
         "--config",

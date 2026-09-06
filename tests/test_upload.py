@@ -78,6 +78,29 @@ class UploadTests(unittest.TestCase):
             self.assertFalse(result["side_effects"]["restore"])
             self.assertFalse(result["side_effects"]["preconfig_switch"])
 
+    def test_upload_custom_path_is_used_in_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = Path(temp_dir) / "preconfig.bin"
+            file_path.write_bytes(b"data")
+            calls: list[dict[str, object]] = []
+
+            def post(url: str, **kwargs: object) -> FakeResponse:
+                calls.append({"url": url, **kwargs})
+                return FakeResponse(200, "upload ok")
+
+            result = upload_file(
+                ip="192.168.1.1",
+                action="preconfig",
+                file_path=file_path,
+                sessionid="secret-token",
+                timeout=5.0,
+                path="/custom/upload",
+                post=post,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(calls[0]["url"], "http://192.168.1.1:8080/custom/upload?action=preconfig")
+
     def test_upload_http_failure_is_structured_and_redacted(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             file_path = Path(temp_dir) / "preconfig.bin"

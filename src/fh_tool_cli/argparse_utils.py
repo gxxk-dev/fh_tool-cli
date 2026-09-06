@@ -35,6 +35,15 @@ def normalize_port(value: str) -> int:
     return port
 
 
+def normalize_path(value: str) -> str:
+    if not value.startswith("/"):
+        raise argparse.ArgumentTypeError(f"路径必须以 / 开头: {value}")
+    for char in "?# \t\r\n":
+        if char in value:
+            raise argparse.ArgumentTypeError(f"路径不能包含 {char!r}: {value}")
+    return value
+
+
 def parse_scalar(value: str) -> Any:
     lowered = value.lower()
     if lowered == "true":

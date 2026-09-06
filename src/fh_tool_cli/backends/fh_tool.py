@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from typing import Any
+from typing import Any, NamedTuple
 
 import requests
 
@@ -13,15 +13,30 @@ from ..errors import FHToolError
 from ..fh_endpoints import (
     DEFAULT_FH_TOOL_PORT,
     FALLBACK_FH_TOOL_PORTS,
+    FH_TOOL_API_PATH,
+    FH_TOOL_UPLOAD_PATH,
     PORT_PROBE_TCP_TIMEOUT,
+    TOOL_DOWNLOAD_PATH,
     fh_tool_url,
 )
 from ..output import log_event
 
-FH_TOOL_API_PATH = "/fh_tool/api"
-FH_TOOL_UPLOAD_PATH = "/fh_tool/upload"
-TOOL_DOWNLOAD_PATH = "/fh_tool/tool_download"
-SURFACE_PROBE_PATHS = (FH_TOOL_API_PATH, FH_TOOL_UPLOAD_PATH, TOOL_DOWNLOAD_PATH)
+
+class FhPaths(NamedTuple):
+    """三个 fh_tool 端点的实际请求路径（默认值或 --fh-*-path 覆盖值）。"""
+
+    api: str
+    upload: str
+    download: str
+
+
+def fh_paths_from_args(args: argparse.Namespace) -> FhPaths:
+    """解析端点路径；parser 没有对应选项时（如 web 命令族）回退默认值。"""
+    return FhPaths(
+        api=getattr(args, "fh_api_path", None) or FH_TOOL_API_PATH,
+        upload=getattr(args, "fh_upload_path", None) or FH_TOOL_UPLOAD_PATH,
+        download=getattr(args, "fh_download_path", None) or TOOL_DOWNLOAD_PATH,
+    )
 
 
 def fh_tool_call(
@@ -31,12 +46,13 @@ def fh_tool_call(
     timeout: float,
     *,
     port: int = DEFAULT_FH_TOOL_PORT,
+    path: str = FH_TOOL_API_PATH,
 ) -> dict[str, Any]:
     crypto = derive_crypto(mac)
     encrypted = encrypt_payload(payload, crypto)
-    url = fh_tool_url(ip, port, FH_TOOL_API_PATH)
+    url = fh_tool_url(ip, port, path)
     func = str(payload.get("func", "unknown"))
-    log_event(logging.INFO, "fh_tool.api.request", ip=ip, port=port, path=FH_TOOL_API_PATH, func=func)
+    log_event(logging.INFO, "fh_tool.api.request", ip=ip, port=port, path=path, func=func)
     try:
         response = requests.post(
             url,
@@ -49,7 +65,7 @@ def fh_tool_call(
             allow_redirects=False,
         )
     except requests.RequestException as exc:
-        log_event(logging.INFO, "fh_tool.api.error", ip=ip, path=FH_TOOL_API_PATH, func=func, error=str(exc))
+        log_event(logging.INFO, "fh_tool.api.error", ip=ip, path=path, func=func, error=str(exc))
         raise FHToolError(f"无法连接 {url}: {exc}") from exc
 
     if response.status_code != 200:
@@ -57,22 +73,22 @@ def fh_tool_call(
             logging.INFO,
             "fh_tool.api.http_error",
             ip=ip,
-            path=FH_TOOL_API_PATH,
+            path=path,
             func=func,
             status_code=response.status_code,
         )
-        raise FHToolError(f"{FH_TOOL_API_PATH} 返回 HTTP {response.status_code}")
+        raise FHToolError(f"{path} 返回 HTTP {response.status_code}")
 
     try:
         result = decrypt_payload(response.text, crypto)
     except Exception as exc:
-        log_event(logging.INFO, "fh_tool.api.decrypt_error", ip=ip, path=FH_TOOL_API_PATH, func=func)
+        log_event(logging.INFO, "fh_tool.api.decrypt_error", ip=ip, path=path, func=func)
         raise FHToolError("响应解密失败，MAC 可能不匹配或固件协议不同") from exc
     log_event(
         logging.INFO,
         "fh_tool.api.response",
         ip=ip,
-        path=FH_TOOL_API_PATH,
+        path=path,
         func=func,
         status_code=response.status_code,
         result=result.get("result") if isinstance(result, dict) else None,
@@ -87,16 +103,16 @@ def api_payload(func: str, params: dict[str, Any] | None = None, index: str = "1
     return payload
 
 
-def verify_fh_tool_port(ip: str, port: int, mac: str, timeout: float) -> bool:
+def verify_fh_tool_port(ip: str, port: int, mac: str, timeout: float, *, path: str = FH_TOOL_API_PATH) -> bool:
     try:
-        result = fh_tool_call(ip, mac, api_payload("GetDevInfo"), timeout, port=port)
+        result = fh_tool_call(ip, mac, api_payload("GetDevInfo"), timeout, port=port, path=path)
     except FHToolError:
         return False
     return result.get("result") == 0
 
 
-def _surface_reachable(ip: str, port: int, timeout: float) -> bool:
-    url = fh_tool_url(ip, port, FH_TOOL_API_PATH)
+def _surface_reachable(ip: str, port: int, timeout: float, *, path: str = FH_TOOL_API_PATH) -> bool:
+    url = fh_tool_url(ip, port, path)
     try:
         response = requests.get(url, timeout=timeout, allow_redirects=False)
     except requests.RequestException:
@@ -112,6 +128,7 @@ def resolve_fh_port(
     mac: str | None = None,
     timeout: float,
     candidates: tuple[int, ...] = FALLBACK_FH_TOOL_PORTS,
+    path: str = FH_TOOL_API_PATH,
 ) -> tuple[int, str]:
     """解析 fh_tool 后端端口：显式 --fh-port > 8080 TCP 快筛 > 候选端口探测 > 回退默认。
 
@@ -136,9 +153,9 @@ def resolve_fh_port(
             continue
         verified_by = "surface"
         if mac:
-            if verify_fh_tool_port(ip, port, mac, timeout):
+            if verify_fh_tool_port(ip, port, mac, timeout, path=path):
                 verified_by = "getdevinfo"
-            elif not _surface_reachable(ip, port, timeout):
+            elif not _surface_reachable(ip, port, timeout, path=path):
                 continue
         log_event(
             logging.INFO,
@@ -175,10 +192,13 @@ def probe_fh_port_candidates(
     mac: str | None,
     timeout: float,
     ports: tuple[int, ...] | None = None,
+    paths: FhPaths | None = None,
 ) -> dict[str, dict[str, Any]]:
     """对候选端口逐个报告 tcp/surface/getdevinfo 状态，供 probe 命令诊断端点。"""
     if ports is None:
         ports = tuple(dict.fromkeys([DEFAULT_FH_TOOL_PORT, *FALLBACK_FH_TOOL_PORTS]))
+    if paths is None:
+        paths = FhPaths(FH_TOOL_API_PATH, FH_TOOL_UPLOAD_PATH, TOOL_DOWNLOAD_PATH)
     tcp_timeout = min(timeout, PORT_PROBE_TCP_TIMEOUT)
     report: dict[str, dict[str, Any]] = {}
     for port in ports:
@@ -187,7 +207,7 @@ def probe_fh_port_candidates(
             "surface": {},
             "getdevinfo": None,
         }
-        for path in SURFACE_PROBE_PATHS:
+        for path in (paths.api, paths.upload, paths.download):
             url = fh_tool_url(ip, port, path)
             try:
                 response = requests.get(url, timeout=timeout, allow_redirects=False)
@@ -199,7 +219,7 @@ def probe_fh_port_candidates(
                 entry["surface"][path] = {"error": str(exc)}
         if mac and entry["tcp"]:
             try:
-                dev_info = fh_tool_call(ip, mac, api_payload("GetDevInfo"), timeout, port=port)
+                dev_info = fh_tool_call(ip, mac, api_payload("GetDevInfo"), timeout, port=port, path=paths.api)
                 entry["getdevinfo"] = {
                     "ok": dev_info.get("result") == 0,
                     "response": dev_info,
@@ -214,9 +234,10 @@ def call_method(args: argparse.Namespace, func: str, params: dict[str, Any] | No
     ip, ip_source = resolve_ip(args)
     mac, mac_source = resolve_mac(args, ip, required=True)
     assert mac is not None
-    port, port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout)
+    paths = fh_paths_from_args(args)
+    port, port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout, path=paths.api)
     try:
-        response = fh_tool_call(ip, mac, api_payload(func, params), args.timeout, port=port)
+        response = fh_tool_call(ip, mac, api_payload(func, params), args.timeout, port=port, path=paths.api)
     except FHToolError as exc:
         if port_source == "default_unverified":
             raise _unverified_port_hint(exc) from exc
@@ -228,6 +249,7 @@ def call_method(args: argparse.Namespace, func: str, params: dict[str, Any] | No
         "mac_source": mac_source,
         "fh_port": port,
         "fh_port_source": port_source,
+        "fh_api_path": paths.api,
         "request": api_payload(func, params),
         "response": response,
     }

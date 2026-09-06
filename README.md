@@ -114,9 +114,9 @@ fh-tool telnet enable --confirm
 fh-tool ports --ports 23,80,443,8080
 ```
 
-## fh_tool 端口与型号/固件兼容性
+## fh_tool 端口与路径的型号/固件兼容性
 
-不同型号/固件的 fh_tool 后端监听端口可能不同。大多数固件在 `8080`，但例如 **HG6142A3（固件 V03.00.M0000）** 的 fh_tool API 位于 `http://192.168.1.1:80/fh_tool/api`（80 端口）。
+不同型号/固件的 fh_tool 后端监听端口和端点路径可能不同。大多数固件在 `8080` 端口 + 默认路径，但例如 **HG6142A3（固件 V03.00.M0000）** 的 fh_tool API 位于 `http://192.168.1.1:80/fh_tool/api`（80 端口）。
 
 工具默认行为：
 
@@ -131,10 +131,28 @@ fh-tool dev-info --fh-port 80
 fh-tool call --func GetDevInfo --fh-port 80
 ```
 
+### 端点路径自定义
+
+三个 fh_tool 端点路径都支持手动覆盖（仅手动，不做自动探测——路径候选无界，无法枚举）：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--fh-api-path` | `/fh_tool/api` | RPC 端点，影响所有 fh_tool 调用与端口探测验证 |
+| `--fh-upload-path` | `/fh_tool/upload` | 上传端点（`fh-tool upload`） |
+| `--fh-download-path` | `/fh_tool/tool_download` | 仅影响 `fh-tool probe` 的 surface 检查；实际下载 URL 以设备返回为准 |
+
+```bash
+fh-tool dev-info --fh-api-path /custom/api
+fh-tool probe --json --fh-api-path /custom/api --fh-upload-path /custom/upload --fh-download-path /custom/dl
+fh-tool upload --action preconfig --file sysinfo_conf --sessionid TOKEN --fh-upload-path /custom/upload --confirm
+```
+
+Web 侧端点同样可覆盖：Web AJAX 路径用 `--ajax-path`（默认 `/cgi-bin/ajax`），Web 端口用 `--web-port`。至此全部端点的端口/路径均可在命令行指定。
+
 已知局限：
 
 - 如果 `8080` 与 `80` 同时 TCP 开放、但 fh_tool API 只在 `80`，TCP 快筛会停留在 `8080` 并以 HTTP/解密错误失败，此时需要 `--fh-port 80` 显式指定；`fh-tool probe --json` 的 `fh_ports` 字段可以诊断这种场景。
-- 设备返回的绝对下载 URL（含端口）按原样使用，不会重写端口。
+- 设备返回的绝对下载 URL（含端口和路径）按原样使用，不会重写端口或路径。
 - `HTTP 4xx/5xx`、解密失败不会触发端口切换——那说明 8080 上有 HTTP 服务，问题在路径/协议/MAC 而非端口。
 
 ## 本地 VM 测试环境

@@ -19,11 +19,9 @@ from .account import (
 )
 from .argparse_utils import parse_json_object, parse_kv, parse_ports
 from .backends.fh_tool import (
-    FH_TOOL_API_PATH,
-    FH_TOOL_UPLOAD_PATH,
-    TOOL_DOWNLOAD_PATH,
     api_payload,
     call_method,
+    fh_paths_from_args,
     fh_tool_call,
     fh_tool_url,
     probe_fh_port_candidates,
@@ -188,7 +186,8 @@ def command_probe(args: argparse.Namespace) -> dict[str, Any]:
     ip, ip_source = resolve_ip(args)
     mac, mac_source = resolve_mac(args, ip, required=False, allow_prompt=False)
     ports = parse_ports(args.ports)
-    fh_port, fh_port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout)
+    fh_paths = fh_paths_from_args(args)
+    fh_port, fh_port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout, path=fh_paths.api)
 
     result: dict[str, Any] = {
         "mode": "probe",
@@ -198,13 +197,16 @@ def command_probe(args: argparse.Namespace) -> dict[str, Any]:
         "mac_source": mac_source,
         "fh_port": fh_port,
         "fh_port_source": fh_port_source,
+        "fh_api_path": fh_paths.api,
+        "fh_upload_path": fh_paths.upload,
+        "fh_download_path": fh_paths.download,
         "tcp": {str(port): tcp_open(ip, port, args.timeout) for port in ports},
         "surface": {},
         "fh_tool_probe": None,
-        "fh_ports": probe_fh_port_candidates(ip, mac, args.timeout),
+        "fh_ports": probe_fh_port_candidates(ip, mac, args.timeout, paths=fh_paths),
     }
 
-    for path in [FH_TOOL_API_PATH, FH_TOOL_UPLOAD_PATH, TOOL_DOWNLOAD_PATH]:
+    for path in [fh_paths.api, fh_paths.upload, fh_paths.download]:
         url = fh_tool_url(ip, fh_port, path)
         try:
             response = requests.get(url, timeout=args.timeout, allow_redirects=False)
@@ -223,6 +225,7 @@ def command_probe(args: argparse.Namespace) -> dict[str, Any]:
                 api_payload("GetDevInfo"),
                 args.timeout,
                 port=fh_port,
+                path=fh_paths.api,
             )
             result["fh_tool_probe"] = {
                 "func": "GetDevInfo",
@@ -1014,7 +1017,8 @@ def command_upload(args: argparse.Namespace) -> dict[str, Any]:
     dry_run = not is_confirmed(args)
     ip, ip_source = resolve_ip(args)
     mac, _mac_source = resolve_mac(args, ip, required=False, allow_prompt=False)
-    fh_port, fh_port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout)
+    fh_paths = fh_paths_from_args(args)
+    fh_port, fh_port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout, path=fh_paths.api)
     file_path = Path(args.file).expanduser()
     result = upload_file(
         ip=ip,
@@ -1023,11 +1027,13 @@ def command_upload(args: argparse.Namespace) -> dict[str, Any]:
         sessionid=args.sessionid,
         timeout=args.timeout,
         port=fh_port,
+        path=fh_paths.upload,
         dry_run=dry_run,
     )
     result["ip_source"] = ip_source
     result["fh_port"] = fh_port
     result["fh_port_source"] = fh_port_source
+    result["fh_upload_path"] = fh_paths.upload
     if dry_run:
         _attach_dry_run_notice(result)
     return result

@@ -39,11 +39,12 @@ def upload_file(
     sessionid: str,
     timeout: float,
     port: int = DEFAULT_FH_TOOL_PORT,
+    path: str = FH_TOOL_UPLOAD_PATH,
     dry_run: bool = False,
     post: Callable[..., Any] = requests.post,
 ) -> dict[str, Any]:
     file_info = _validate_upload_inputs(action, file_path, sessionid)
-    url = f"http://{ip}:{port}{FH_TOOL_UPLOAD_PATH}?action={action}"
+    url = f"http://{ip}:{port}{path}?action={action}"
     base = _upload_result_base(
         ip=ip,
         url=url,

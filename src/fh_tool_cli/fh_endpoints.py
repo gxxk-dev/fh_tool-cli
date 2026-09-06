@@ -10,6 +10,11 @@ FALLBACK_FH_TOOL_PORTS = (80,)
 # TCP 探测超时上限（秒），控制候选端口全部不可达时的最坏延迟。
 PORT_PROBE_TCP_TIMEOUT = 2.0
 
+# fh_tool 后端三个端点的默认路径；不同型号/固件整体迁移时用 --fh-*-path 覆盖。
+FH_TOOL_API_PATH = "/fh_tool/api"
+FH_TOOL_UPLOAD_PATH = "/fh_tool/upload"
+TOOL_DOWNLOAD_PATH = "/fh_tool/tool_download"
+
 
 def fh_tool_base_url(ip: str, port: int) -> str:
     return f"http://{ip}:{port}"

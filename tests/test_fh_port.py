@@ -95,7 +95,7 @@ class ResolveFhPortTests(unittest.TestCase):
                 resolve_fh_port(_args(), TEST_IP, mac=TEST_MAC, timeout=1.0),
                 (80, "auto_detected"),
             )
-        verify_mock.assert_called_once_with(TEST_IP, 80, TEST_MAC, 1.0)
+        verify_mock.assert_called_once_with(TEST_IP, 80, TEST_MAC, 1.0, path="/fh_tool/api")
 
     def test_fallback_detected_by_surface_when_getdevinfo_fails(self) -> None:
         with (
