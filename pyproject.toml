@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fh_tool-cli"
-version = "0.2.5"
+version = "0.2.6"
 description = "用于本地管理 FiberHome fh_tool 接口的 Python CLI"
 readme = "README.md"
 requires-python = ">=3.11"
