@@ -155,6 +155,18 @@ Web 侧端点同样可覆盖：Web AJAX 路径用 `--ajax-path`（默认 `/cgi-b
 - 设备返回的绝对下载 URL（含端口和路径）按原样使用，不会重写端口或路径。
 - `HTTP 4xx/5xx`、解密失败不会触发端口切换——那说明 8080 上有 HTTP 服务，问题在路径/协议/MAC 而非端口。
 
+## Telnet 自动登录兼容性
+
+CLI 的 Telnet 自动登录采用提示符等待驱动，而不是固定延时盲发：
+
+1. 等待 `Login:`/`Username:`（大小写不敏感，兼容 HG6142A3 的 `Login:` 与 HG5143F 的小写 `login:`）后发送用户名；
+2. 等待 `Password:` 后发送密码；
+3. 等待 shell prompt（行尾 `#`/`$`/`>`）出现后再执行命令。
+
+认证失败会显式报错：出现 `incorrect`/`failed`/`denied`/`rejected`/`bad password`、登录提示回弹（认证被弹回 `Login:`/`Password:`）或连接在登录阶段关闭时，返回 `Telnet login failed: ...` / `Telnet su failed: ...` / `Telnet connection closed during login`，而不是把命令盲发到登录提示符上。
+
+兼容性降级：如果超时仍无法确认 shell prompt（固件使用非标准提示符），命令仍会照常发送，但会记录 `telnet.prompt.unconfirmed` warning。Telnet IAC 协商按最小应答处理（对 DO/WILL 回 WONT/DONT，子协商跳过），适配要求协商响应后才打印登录提示的 telnetd，IAC 字节也不会污染输出。
+
 ## 本地 VM 测试环境
 
 如果已经在 `/mnt/dev-cold/HG5143F-ONU-vm` 启动本地 userspace VM，可直接用它测试 `cfg_cmd` 和 Web AJAX，不需要碰真实网关：
