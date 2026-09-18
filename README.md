@@ -64,6 +64,22 @@ fh-tool config show
 fh-tool dev-info --ip 192.168.1.1 --mac AABBCCDDEEFF
 ```
 
+## 想让你的型号被支持?
+
+工具当前收录了 HG5143F 与 HG6142A3(联通)的凭据派生公式。如果你的光猫不在这两条
+规则里(Telnet/`su` 登录失败、`/var/telsu` hash 对不上等),有两条路:
+
+1. **让 AI 帮你适配(推荐)**:在设备可达时运行 `fh-tool adapt-prompt`,把生成的
+   调研 prompt(含设备上下文)粘贴给你的 AI coding agent(Claude Code、Codex、
+   Cursor 等);agent 会按仓库根目录的 [ADAPT.md](ADAPT.md) 完成实机调研、脚手架接入、
+   测试,并经 fork 向上游发 PR。任何 AI agent 进入仓库也会被 `AGENTS.md` 自动路由到
+   同一流程。
+2. **只提交调研结论**:按
+   [issue 模板](https://github.com/gxxk-dev/fh_tool-cli/blob/main/.github/ISSUE_TEMPLATE/device-adaptation.md)
+   填好公式/hash/端口证据开成 issue,由维护者接入。
+
+红线:只适配你自己的设备;严禁批量爆破密码;公式必须有实机证据,工具永远不会盲猜。
+
 ## 常用命令
 
 低风险 probe（输出 `fh_port`/`fh_port_source` 与各候选端口 `fh_ports` 明细，可用于诊断 fh_tool API 所在端口）：

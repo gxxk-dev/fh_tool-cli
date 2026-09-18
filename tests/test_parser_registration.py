@@ -9,6 +9,7 @@ class ParserRegistrationTests(unittest.TestCase):
     def test_representative_commands_bind_expected_handlers(self) -> None:
         cases = [
             (["probe", "--ip", "192.168.1.1"], cli.command_probe),
+            (["adapt-prompt", "--ip", "192.168.1.1"], cli.command_adapt_prompt),
             (["cfg", "get", "InternetGatewayDevice.DeviceInfo.Manufacturer"], cli.command_cfg_get),
             (["wan", "list", "--backend", "local-vm"], cli.command_wan_list),
             (["vm", "collect", "--ip", "192.168.1.1", "--output", "/tmp/dumps"], cli.command_vm_collect),

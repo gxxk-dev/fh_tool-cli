@@ -214,6 +214,14 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
     probe.add_argument("--ports", default=DEFAULT_PORTS, help=f"逗号分隔 port，默认 {DEFAULT_PORTS}")
     probe.set_defaults(handler=_handler(handlers, "command_probe"))
 
+    adapt_prompt = subparsers.add_parser(
+        "adapt-prompt",
+        help="生成设备适配调研 prompt，可直接交给你的 AI agent（见 ADAPT.md）",
+    )
+    add_common_options(adapt_prompt)
+    adapt_prompt.add_argument("--output", help="把 prompt 写入文件而不只打印")
+    adapt_prompt.set_defaults(handler=_handler(handlers, "command_adapt_prompt"))
+
     ports = subparsers.add_parser("ports", help="检查 TCP port 是否打开")
     add_common_options(ports)
     ports.add_argument("--ports", default=DEFAULT_PORTS, help=f"逗号分隔 port，默认 {DEFAULT_PORTS}")

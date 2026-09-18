@@ -251,6 +251,7 @@ class TelnetBackendTests(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("均登录失败", message)
         self.assertIn("--username/--password", message)
+        self.assertIn("adapt-prompt", message)
         # 两组候选都没成功，任何连接都不应有命令被发送。
         self.assertNotIn(b"id\n", first.sent)
         self.assertNotIn(b"id\n", second.sent)

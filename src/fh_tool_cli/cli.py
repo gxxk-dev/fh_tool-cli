@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from dataclasses import replace
@@ -83,6 +84,7 @@ from .diagnostics import (
     wan_list,
 )
 from .errors import CliError, FHToolError
+from .parser import DEFAULT_PORTS
 from .parser import add_api_command as _add_parser_api_command
 from .parser import parse_args as _parse_cli_args
 from .remote import (
@@ -248,6 +250,89 @@ def command_probe(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     return result
+
+
+ADAPT_GUIDE_URL = "https://github.com/gxxk-dev/fh_tool-cli/blob/main/ADAPT.md"
+
+
+def _adapt_prompt_context(args: argparse.Namespace) -> dict[str, Any]:
+    """只读采集设备上下文（probe + GetDevInfo），供 adapt-prompt 渲染。
+
+    此时未登录 Telnet，天然不含凭据或密码 hash；设备不可达时各项留空并记录
+    probe_error，保证离线也能生成 prompt。
+    """
+    if not hasattr(args, "ports"):
+        args.ports = DEFAULT_PORTS
+    context: dict[str, Any] = {
+        "ip": None,
+        "mac": None,
+        "fh_port": None,
+        "fh_port_source": None,
+        "dev_info_ok": None,
+        "dev_info": None,
+        "probe_error": None,
+    }
+    try:
+        probe = command_probe(args)
+    except (CliError, FHToolError, requests.RequestException) as exc:
+        context["probe_error"] = str(exc)
+        return context
+    context["ip"] = probe.get("ip")
+    context["mac"] = probe.get("mac")
+    context["fh_port"] = probe.get("fh_port")
+    context["fh_port_source"] = probe.get("fh_port_source")
+    fh_tool_probe = probe.get("fh_tool_probe") or {}
+    context["dev_info_ok"] = fh_tool_probe.get("ok")
+    if fh_tool_probe.get("ok"):
+        # GetDevInfo 响应按 key 脱敏后再嵌入 prompt。
+        context["dev_info"] = _redact_plan_value(fh_tool_probe.get("response"))
+    return context
+
+
+def _render_adapt_prompt(context: dict[str, Any]) -> str:
+    """把设备上下文渲染成可直接交给任意 AI agent 的适配调研 prompt。"""
+    context_json = json.dumps(context, ensure_ascii=False, indent=2)
+    return f"""请帮我把一台尚未被支持的 FiberHome 光猫适配进 fh_tool-cli 项目。
+
+## 设备上下文（由 fh-tool adapt-prompt 只读采集）
+
+```json
+{context_json}
+```
+
+## 你要做的事
+
+1. 在本仓库根目录完整阅读 `ADAPT.md`，严格按其阶段流程执行（实机调研 → 脚手架接入 → 测试与实机验证 → fork + 上游 PR），并遵守其中的触点索引表。
+2. 若暂时无法完成代码接入（例如拿不到实机 Telnet），退而求其次：按 `ADAPT.md` 的"仅贡献调研结论"一节，把公式与证据提交为上游 issue。
+
+## 安全红线（不可违反）
+
+- 只操作我自己的设备，不触碰任何其它主机。
+- 严禁批量爆破密码：只允许有限次尝试已知默认组合，失败即停止并向我要凭据。
+- 派生公式必须有至少 2 个独立证据（登录成功 / /var/telsu hash 吻合等）才能标记 verified；无法验证时明确报错，绝不盲猜。
+- 写入设备配置前必须备份并获得我的确认。
+
+适配指南：{ADAPT_GUIDE_URL}
+
+（发送本 prompt 前可自行抹去上文的 IP/MAC 等局域网信息。）
+"""
+
+
+def command_adapt_prompt(args: argparse.Namespace) -> Any:
+    """生成"适配我的设备"调研 prompt；默认打印 Markdown，--output 写文件。"""
+    context = _adapt_prompt_context(args)
+    prompt = _render_adapt_prompt(context)
+    output_path = getattr(args, "output", None)
+    if output_path:
+        path = Path(output_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(prompt, encoding="utf-8")
+        if getattr(args, "json", False):
+            return {"output": str(path), "context": context, "prompt": prompt}
+        return f"已写入 {path}"
+    if getattr(args, "json", False):
+        return {"context": context, "prompt": prompt}
+    return prompt
 
 
 def command_ports(args: argparse.Namespace) -> dict[str, Any]:
@@ -1090,6 +1175,7 @@ def command_upload(args: argparse.Namespace) -> dict[str, Any]:
 def _command_handlers() -> dict[str, Any]:
     return {
         "command_probe": command_probe,
+        "command_adapt_prompt": command_adapt_prompt,
         "command_ports": command_ports,
         "command_config_decrypt": command_config_decrypt,
         "command_backup_create": command_backup_create,

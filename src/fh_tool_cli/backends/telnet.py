@@ -178,7 +178,10 @@ class TelnetShell:
             raise FHToolError(
                 f"{last_error}；自动派生 Telnet 候选"
                 "（HG5143F telnetadmin / HG6142A3 admin）均登录失败，"
-                "请显式提供 --username/--password"
+                "请显式提供 --username/--password。"
+                "你的型号可能尚未收录：想让 fh-tool 支持它？运行 fh-tool adapt-prompt 生成"
+                "调研 prompt 交给你的 AI agent，或参考 "
+                "https://github.com/gxxk-dev/fh_tool-cli/blob/main/ADAPT.md 提交适配"
             ) from last_error
         raise last_error
 

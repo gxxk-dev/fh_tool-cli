@@ -95,7 +95,10 @@ def resolve_su_password_from_shell(
             f"{SU_RUNTIME_PASSWORD_FILE} hash（{crypt_kind(hashed)}）与已知候选公式"
             f"（{'/'.join(kind for kind, _ in su_password_candidates(mac))}）都不匹配，"
             "root 密码可能已被修改或来自未知固件公式；"
-            "请显式提供 --su-password 或 --su-password-stdin"
+            "请显式提供 --su-password 或 --su-password-stdin。"
+            "该型号可能尚未收录：想让 fh-tool 支持它？运行 fh-tool adapt-prompt 生成"
+            "调研 prompt 交给你的 AI agent，或参考 "
+            "https://github.com/gxxk-dev/fh_tool-cli/blob/main/ADAPT.md 提交适配"
         )
     kind, password = verified
     return password, f"verified-telsu:{kind}"

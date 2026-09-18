@@ -87,8 +87,10 @@ class ResolveSuPasswordTests(unittest.TestCase):
         shell = FakeShell(f"root:{hashed}:0:0:Telnet user:/:/bin/ash\r\n# ")
         args = _derive_args()
 
-        with self.assertRaises(CliError):
+        with self.assertRaises(CliError) as cm:
             resolve_su_password_from_shell(args, ip=UNREACHABLE_IP, shell=shell)
+
+        self.assertIn("adapt-prompt", str(cm.exception))
 
 
 class LazyRootRunnerTests(unittest.TestCase):

@@ -266,3 +266,15 @@ fh-tool ports
 8. Web AJAX read-only backend。
 9. PON/WAN/network typed diagnostics。
 10. 更高风险 restore、SmartSwitch、upload 流程最后再做。
+
+## 11. AI 自助设备适配体系（2026-09 新增）
+
+让持有未支持设备的用户调用自己的 AI agent 完成适配，经 fork → 上游 PR 回流：
+
+- `ADAPT.md`：面向"人类 + 任意 AI agent"的适配指南（安全红线、触点索引表、阶段 0-5、降级路径）。
+- `AGENTS.md` + `CLAUDE.md`：通用 agent 约定与路由（"适配设备 → 必读 ADAPT.md"）。
+- `fh-tool adapt-prompt`：只读采集设备上下文并生成可直接交给任意 agent 的调研 prompt；未知 hash / 登录候选耗尽的错误信息也会引导到它。
+- `scripts/adapt_scaffold.py`：注册表脚手架（锚点注入、dry-run diff、`--write` 全或无 + 全量自检）。
+- `scripts/check_version.py`：pyproject/`__init__`/`uv.lock` 版本一致性检查（发版三处同步防呆）。
+- `.github/`：device-adaptation issue 模板 + PR 模板。
+- 维护者 skill `.claude/skills/adapt-device/`：薄路由到 ADAPT.md + ghis 身份确认等维护者差异步骤。
