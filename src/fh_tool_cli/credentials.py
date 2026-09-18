@@ -4,11 +4,24 @@ from dataclasses import dataclass
 from typing import Any
 
 from .config_store import format_mac, normalize_mac
+from .crypt_unix import crypt_verify
 
-DERIVED_CREDENTIAL_KINDS = ("all", "hg5143f-telnet", "hg5143f-su")
+DERIVED_CREDENTIAL_KINDS = (
+    "all",
+    "hg5143f-telnet",
+    "hg6142a3-telnet",
+    "hg5143f-su",
+    "hg6142a3-root",
+)
 HG5143F_TELNET_USERNAME = "telnetadmin"
 HG5143F_TELNET_PASSWORD_PREFIX = "FH-nE7jA%5m"
+HG6142A3_TELNET_USERNAME = "admin"
+HG6142A3_TELNET_PASSWORD_PREFIX = "Fh@"
 HG5143F_SU_PASSWORD_PREFIX = "Fh@"
+HG6142A3_SU_PASSWORD_PREFIX = "hg2x0"
+# automatic fallback 可补齐密码的 Telnet 用户名集合：显式给出这些用户名且未提供
+# 密码时，也按对应型号公式补齐。
+DERIVED_TELNET_USERNAMES = frozenset({HG5143F_TELNET_USERNAME, HG6142A3_TELNET_USERNAME})
 
 
 @dataclass(frozen=True)
@@ -24,6 +37,7 @@ class DerivedCredential:
     target: str
     confidence: str
     integration_level: str
+    verified: bool | None = None
 
     def render(self, *, reveal_secrets: bool = False) -> dict[str, Any]:
         return {
@@ -38,6 +52,7 @@ class DerivedCredential:
             "persistent": self.persistent,
             "confidence": self.confidence,
             "integration_level": self.integration_level,
+            "verified": self.verified,
             "note": self.note,
         }
 
@@ -67,6 +82,32 @@ def derive_hg5143f_telnet(mac: str) -> DerivedCredential:
     )
 
 
+def derive_hg6142a3_telnet(mac: str) -> DerivedCredential:
+    normalized = normalize_mac(mac)
+    suffix = mac_suffix(normalized)
+    return DerivedCredential(
+        kind="hg6142a3-telnet",
+        username=HG6142A3_TELNET_USERNAME,
+        password=f"{HG6142A3_TELNET_PASSWORD_PREFIX}{suffix}",
+        source=(
+            "HG6142A3 telnetd formula: 'Fh@' + brmac suffix (uppercase), "
+            "live-confirmed by repeated logins"
+        ),
+        mac=normalized,
+        mac_suffix=suffix,
+        persistent=True,
+        target="telnet-login",
+        confidence="medium-hg6142a3-live-confirmed",
+        integration_level="automatic-telnet-fallback",
+        note=(
+            "Telnet login credential confirmed live on HG6142A3 V03.00.M0000 "
+            "(China Unicom): 'admin' logs into an opuser shell. Same 'Fh@' prefix "
+            "as the HG5143F su formula but a different target; the A3 root su "
+            "credential uses the 'hg2x0' prefix instead."
+        ),
+    )
+
+
 def derive_hg5143f_su(mac: str) -> DerivedCredential:
     normalized = normalize_mac(mac)
     suffix = mac_suffix(normalized)
@@ -88,11 +129,81 @@ def derive_hg5143f_su(mac: str) -> DerivedCredential:
     )
 
 
+def derive_hg6142a3_root(mac: str) -> DerivedCredential:
+    normalized = normalize_mac(mac)
+    suffix = mac_suffix(normalized)
+    return DerivedCredential(
+        kind="hg6142a3-root",
+        username="root",
+        password=f"{HG6142A3_SU_PASSWORD_PREFIX}{suffix}",
+        source=(
+            "HG6142A3 protocolmgr China Unicom branch formula: "
+            "'hg2x0' + brmac suffix (uppercase)"
+        ),
+        mac=normalized,
+        mac_suffix=suffix,
+        persistent=False,
+        target="su-root-runtime",
+        confidence="medium-hg6142a3-formula-confirmed",
+        integration_level="derive-display-only",
+        note=(
+            "Root su credential derived by protocolmgr (carrier==CHINA_UNICOM branch) "
+            "into /var/telsu as SHA256-crypt crypt(password, '$5$fh$'); runtime only, "
+            "rebuilt on service start. Static disassembly, /var/telsu hash comparison "
+            "and live 'su root' all verified on HG6142A3 V03.00.M0000 (China Unicom). "
+            "Non-Unicom carriers use the 'Fh@' prefix (hg5143f-su formula) instead."
+        ),
+    )
+
+
 def derive_credentials(mac: str, kind: str) -> list[DerivedCredential]:
     if kind == "all":
-        return [derive_hg5143f_telnet(mac), derive_hg5143f_su(mac)]
+        return [
+            derive_hg5143f_telnet(mac),
+            derive_hg6142a3_telnet(mac),
+            derive_hg5143f_su(mac),
+            derive_hg6142a3_root(mac),
+        ]
     if kind == "hg5143f-telnet":
         return [derive_hg5143f_telnet(mac)]
+    if kind == "hg6142a3-telnet":
+        return [derive_hg6142a3_telnet(mac)]
     if kind == "hg5143f-su":
         return [derive_hg5143f_su(mac)]
+    if kind == "hg6142a3-root":
+        return [derive_hg6142a3_root(mac)]
     raise ValueError(f"unsupported credential kind: {kind}")
+
+
+def telnet_login_candidates(mac: str) -> list[tuple[str, str, str]]:
+    """automatic Telnet fallback 候选（kind, username, password），顺序固定。
+
+    HG5143F telnetadmin 优先（历史兼容），认证失败时由 TelnetShell 逐候选重试；
+    HG6142A3 admin 公式由反馈者在 V03.00.M0000 实机多次登录确认。
+    """
+    suffix = mac_suffix(normalize_mac(mac))
+    return [
+        ("hg5143f-telnet", HG5143F_TELNET_USERNAME, f"{HG5143F_TELNET_PASSWORD_PREFIX}{suffix}"),
+        ("hg6142a3-telnet", HG6142A3_TELNET_USERNAME, f"{HG6142A3_TELNET_PASSWORD_PREFIX}{suffix}"),
+    ]
+
+
+def su_password_candidates(mac: str) -> list[tuple[str, str]]:
+    """已知 su root 公式候选,顺序固定(HG5143F 优先)。
+
+    前缀由 carrier 分支决定:CHINA_UNICOM -> hg2x0,其它 -> Fh@。
+    MAC 后缀沿用 normalize_mac 的大写十六进制(两台实机验证均为大写)。
+    """
+    suffix = mac_suffix(normalize_mac(mac))
+    return [
+        ("hg5143f-su", f"{HG5143F_SU_PASSWORD_PREFIX}{suffix}"),
+        ("hg6142a3-root", f"{HG6142A3_SU_PASSWORD_PREFIX}{suffix}"),
+    ]
+
+
+def verify_su_password_candidates(hashed: str, mac: str) -> tuple[str, str] | None:
+    """对 /var/telsu 的 crypt hash 验证候选公式,命中返回 (kind, password)。"""
+    for kind, password in su_password_candidates(mac):
+        if crypt_verify(password, hashed):
+            return kind, password
+    return None

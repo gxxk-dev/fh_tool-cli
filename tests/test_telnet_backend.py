@@ -179,8 +179,144 @@ class TelnetBackendTests(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("Telnet login failed", message)
         self.assertIn("incorrect", message)
+        self.assertIn("--username/--password", message)
         # 认证失败时命令不应被盲发。
         self.assertNotIn(b"id\n", fake_socket.sent)
+
+    def test_login_fallback_retries_next_candidate_on_new_connection(self) -> None:
+        first = FakeSocket(
+            [
+                b"Login: ",
+                b"Password: ",
+                b"Login incorrect\r\nLogin: ",
+                b"",
+            ]
+        )
+        second = FakeSocket(
+            [
+                b"Login: ",
+                b"Password: ",
+                b"~ # ",
+                b"ok\n",
+                b"",
+            ]
+        )
+        fallback = _credentials(username="admin", password="Fh@36BC10")
+        shell = TelnetShell(
+            _credentials(fallback_credentials=(fallback,)),
+        )
+
+        with patch(
+            "socket.create_connection",
+            side_effect=[first, second],
+        ) as create_connection:
+            output = shell.run("id")
+
+        create_connection.assert_called_with(("192.168.1.1", 23), timeout=3)
+        # 第一次连接只做登录尝试，命令只发给登录成功的那次连接。
+        self.assertEqual(
+            first.sent,
+            [b"telnetadmin\n", b"telnet-secret\n"],
+        )
+        self.assertEqual(
+            second.sent,
+            [b"admin\n", b"Fh@36BC10\n", b"id\n", b"exit\n"],
+        )
+        self.assertEqual(output, "ok\n")
+
+    def test_login_fallback_exhausted_appends_hint(self) -> None:
+        first = FakeSocket(
+            [
+                b"Login: ",
+                b"Password: ",
+                b"Login incorrect\r\nLogin: ",
+                b"",
+            ]
+        )
+        second = FakeSocket(
+            [
+                b"Login: ",
+                b"Password: ",
+                b"Login incorrect\r\nLogin: ",
+                b"",
+            ]
+        )
+        fallback = _credentials(username="admin", password="Fh@36BC10")
+        shell = TelnetShell(_credentials(fallback_credentials=(fallback,)))
+
+        with patch("socket.create_connection", side_effect=[first, second]):
+            with self.assertRaises(FHToolError) as ctx:
+                shell.run("id")
+
+        message = str(ctx.exception)
+        self.assertIn("均登录失败", message)
+        self.assertIn("--username/--password", message)
+        # 两组候选都没成功，任何连接都不应有命令被发送。
+        self.assertNotIn(b"id\n", first.sent)
+        self.assertNotIn(b"id\n", second.sent)
+
+    def test_root_session_login_fallback_retries_before_su(self) -> None:
+        first = FakeSocket(
+            [
+                b"Login: ",
+                b"Password: ",
+                b"Login incorrect\r\nLogin: ",
+                b"",
+            ]
+        )
+        second = FakeSocket(
+            [
+                b"Login: ",
+                b"Password: ",
+                b"~ # ",
+                b"Password: ",
+                b"# ",
+                b"uid=0(root)\n",
+                b"",
+            ]
+        )
+        fallback = _credentials(username="admin", password="Fh@36BC10")
+        shell = TelnetShell(_credentials(fallback_credentials=(fallback,)))
+
+        with patch("socket.create_connection", side_effect=[first, second]):
+            output = shell.run_as_root("id", su_password="su-secret")
+
+        self.assertEqual(first.sent, [b"telnetadmin\n", b"telnet-secret\n"])
+        self.assertEqual(
+            second.sent,
+            [
+                b"admin\n",
+                b"Fh@36BC10\n",
+                b"su root\n",
+                b"su-secret\n",
+                b"id\n",
+                b"exit\n",
+                b"exit\n",
+            ],
+        )
+        self.assertIn("uid=0(root)", output)
+
+    def test_su_failure_does_not_retrigger_login_fallback(self) -> None:
+        fake_socket = FakeSocket(
+            [
+                b"Login: ",
+                b"Password: ",
+                b"~ # ",
+                b"Password: ",
+                b"Password: ",
+                b"",
+            ]
+        )
+        fallback = _credentials(username="admin", password="Fh@36BC10")
+        shell = TelnetShell(_credentials(fallback_credentials=(fallback,)))
+
+        with patch("socket.create_connection", return_value=fake_socket) as create_connection:
+            with self.assertRaises(FHToolError) as ctx:
+                shell.run_as_root("id", su_password="wrong-su")
+
+        # su 阶段失败属于命令会话内失败，不再换凭据重连。
+        create_connection.assert_called_once()
+        self.assertIn("Telnet su failed", str(ctx.exception))
 
     def test_connection_closed_before_login_prompt(self) -> None:
         fake_socket = FakeSocket([b""])

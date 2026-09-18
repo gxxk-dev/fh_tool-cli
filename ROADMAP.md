@@ -112,6 +112,9 @@ fh-tool account set-su-runtime-password --password-stdin --confirm
 - 当前只做 runtime 覆写 `/var/telsu`。
 - 明确标注 reboot/serviceMgr 重建后可能丢失。
 - 不默认实现持久 patch `serviceMgr` 或 init hook。
+- su 密码自动推断：未显式提供 `--su-password` 时，读取 `/var/telsu` 的 crypt hash（HG5143F 一系 `$1$` md5-crypt、HG6142A3 一系 `$5$fh$` SHA256-crypt），在本地对候选公式（`Fh@`+MAC 后缀、联通分支 `hg2x0`+MAC 后缀）做验证，命中才使用；读不到或全不匹配时明确报错，不盲猜。
+- Telnet 登录自动推断：未显式提供凭据时按型号候选依次尝试（HG5143F `telnetadmin`+`FH-nE7jA%5m`+MAC 后缀、HG6142A3 `admin`+`Fh@`+MAC 后缀，后者为实机多次登录确认），认证失败换下一候选重连重试，命令阶段失败不重试；两组候选都失败时明确报错引导显式传凭据。
+- 派生候选默认脱敏；验证过程不输出明文，与"不在工具代码里写死固定目标密码"红线不冲突。
 
 密码输入规则：
 

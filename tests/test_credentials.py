@@ -7,9 +7,16 @@ from fh_tool_cli.commands.web import _web_telnet_login_from_args
 from fh_tool_cli.credentials import (
     HG5143F_SU_PASSWORD_PREFIX,
     HG5143F_TELNET_PASSWORD_PREFIX,
+    HG6142A3_SU_PASSWORD_PREFIX,
+    HG6142A3_TELNET_PASSWORD_PREFIX,
     derive_credentials,
     derive_hg5143f_su,
     derive_hg5143f_telnet,
+    derive_hg6142a3_root,
+    derive_hg6142a3_telnet,
+    su_password_candidates,
+    telnet_login_candidates,
+    verify_su_password_candidates,
 )
 from fh_tool_cli.errors import CliError
 
@@ -50,7 +57,78 @@ class CredentialsTests(unittest.TestCase):
     def test_derive_credentials_all(self) -> None:
         credentials = derive_credentials("D8F50736BC10", "all")
 
-        self.assertEqual([credential.kind for credential in credentials], ["hg5143f-telnet", "hg5143f-su"])
+        self.assertEqual(
+            [credential.kind for credential in credentials],
+            ["hg5143f-telnet", "hg6142a3-telnet", "hg5143f-su", "hg6142a3-root"],
+        )
+
+    def test_hg6142a3_telnet_derivation_uses_f_h_prefix(self) -> None:
+        credential = derive_hg6142a3_telnet("D8:F5:07:36:BC:10")
+
+        self.assertEqual(credential.kind, "hg6142a3-telnet")
+        self.assertEqual(credential.username, "admin")
+        self.assertTrue(credential.password.startswith(HG6142A3_TELNET_PASSWORD_PREFIX))
+        self.assertEqual(credential.password, "Fh@36BC10")
+        self.assertEqual(credential.target, "telnet-login")
+        self.assertEqual(credential.integration_level, "automatic-telnet-fallback")
+
+    def test_telnet_login_candidates_are_ordered(self) -> None:
+        candidates = telnet_login_candidates("D8F50736BC10")
+
+        self.assertEqual(
+            candidates,
+            [
+                ("hg5143f-telnet", "telnetadmin", "FH-nE7jA%5m36BC10"),
+                ("hg6142a3-telnet", "admin", "Fh@36BC10"),
+            ],
+        )
+
+    def test_hg6142a3_root_derivation_uses_unicom_prefix(self) -> None:
+        credential = derive_hg6142a3_root("D8F50736BC10")
+
+        self.assertEqual(credential.kind, "hg6142a3-root")
+        self.assertEqual(credential.username, "root")
+        self.assertTrue(credential.password.startswith(HG6142A3_SU_PASSWORD_PREFIX))
+        self.assertEqual(credential.password, "hg2x036BC10")
+        self.assertFalse(credential.persistent)
+        self.assertEqual(credential.integration_level, "derive-display-only")
+        self.assertIsNone(credential.verified)
+        self.assertIn("CHINA_UNICOM", credential.note)
+
+    def test_su_password_candidates_are_ordered(self) -> None:
+        candidates = su_password_candidates("D8F50736BC10")
+
+        self.assertEqual(
+            candidates,
+            [("hg5143f-su", "Fh@36BC10"), ("hg6142a3-root", "hg2x036BC10")],
+        )
+
+    def test_verify_su_password_candidates_matches_hg6142a3_hash(self) -> None:
+        from fh_tool_cli.crypt_unix import sha256_crypt
+
+        hashed = sha256_crypt("hg2x036BC10", "fh")
+        verified = verify_su_password_candidates(hashed, "D8F50736BC10")
+
+        self.assertEqual(verified, ("hg6142a3-root", "hg2x036BC10"))
+
+    def test_verify_su_password_candidates_matches_hg5143f_hash(self) -> None:
+        hashed = "$1$$c29kb1Alc4Ic54TuMH2iv."
+        verified = verify_su_password_candidates(hashed, "D8F50736BC10")
+
+        self.assertEqual(verified, ("hg5143f-su", "Fh@36BC10"))
+
+    def test_verify_su_password_candidates_returns_none_on_mismatch(self) -> None:
+        from fh_tool_cli.crypt_unix import sha256_crypt
+
+        hashed = sha256_crypt("changed-password", "fh")
+
+        self.assertIsNone(verify_su_password_candidates(hashed, "D8F50736BC10"))
+
+    def test_render_includes_verified_field(self) -> None:
+        rendered = derive_hg6142a3_root("D8F50736BC10").render()
+
+        self.assertIsNone(rendered["verified"])
+        self.assertEqual(rendered["kind"], "hg6142a3-root")
 
     def test_credentials_derive_command_redacts(self) -> None:
         args = parse_args(
@@ -58,7 +136,7 @@ class CredentialsTests(unittest.TestCase):
                 "credentials",
                 "derive",
                 "--ip",
-                "192.168.1.1",
+                "192.0.2.1",
                 "--mac",
                 "D8F50736BC10",
                 "--kind",
@@ -78,7 +156,7 @@ class CredentialsTests(unittest.TestCase):
                 "get",
                 "InternetGatewayDevice.DeviceInfo.Manufacturer",
                 "--ip",
-                "192.168.1.1",
+                "192.0.2.1",
                 "--mac",
                 "D8F50736BC10",
             ]
@@ -89,6 +167,32 @@ class CredentialsTests(unittest.TestCase):
         self.assertEqual(credentials.username, "telnetadmin")
         self.assertIsNotNone(credentials.password)
         self.assertTrue(credentials.password.endswith("36BC10"))
+        # HG6142A3 admin 候选作为备用凭据，认证失败时自动重试。
+        self.assertEqual(len(credentials.fallback_credentials), 1)
+        fallback = credentials.fallback_credentials[0]
+        self.assertEqual(fallback.username, "admin")
+        self.assertEqual(fallback.password, "Fh@36BC10")
+
+    def test_explicit_admin_username_gets_hg6142a3_password(self) -> None:
+        args = parse_args(
+            [
+                "cfg",
+                "get",
+                "InternetGatewayDevice.DeviceInfo.Manufacturer",
+                "--ip",
+                "192.0.2.1",
+                "--mac",
+                "D8F50736BC10",
+                "--username",
+                "admin",
+            ]
+        )
+
+        credentials = _telnet_credentials_from_args(args)
+
+        self.assertEqual(credentials.username, "admin")
+        self.assertEqual(credentials.password, "Fh@36BC10")
+        self.assertEqual(credentials.fallback_credentials, ())
 
     def test_telnet_derived_credentials_can_be_disabled(self) -> None:
         args = parse_args(
@@ -97,7 +201,7 @@ class CredentialsTests(unittest.TestCase):
                 "get",
                 "InternetGatewayDevice.DeviceInfo.Manufacturer",
                 "--ip",
-                "192.168.1.1",
+                "192.0.2.1",
                 "--mac",
                 "D8F50736BC10",
                 "--no-derived-credentials",
@@ -116,7 +220,7 @@ class CredentialsTests(unittest.TestCase):
                 "get",
                 "InternetGatewayDevice.DeviceInfo.Manufacturer",
                 "--ip",
-                "192.168.1.1",
+                "192.0.2.1",
                 "--mac",
                 "D8F50736BC10",
                 "--username",
@@ -139,7 +243,7 @@ class CredentialsTests(unittest.TestCase):
                 "get",
                 "InternetGatewayDevice.DeviceInfo.Manufacturer",
                 "--ip",
-                "192.168.1.1",
+                "192.0.2.1",
                 "--mac",
                 "D8F50736BC10",
                 "--username",
@@ -159,13 +263,13 @@ class CredentialsTests(unittest.TestCase):
                 "get",
                 "get_base_info",
                 "--ip",
-                "192.168.1.1",
+                "192.0.2.1",
                 "--mac",
                 "D8F50736BC10",
             ]
         )
 
-        username, password = _web_telnet_login_from_args(args, "192.168.1.1")
+        username, password = _web_telnet_login_from_args(args, "192.0.2.1")
 
         self.assertEqual(username, "telnetadmin")
         self.assertIsNotNone(password)

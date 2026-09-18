@@ -91,6 +91,25 @@ class ParserRegistrationTests(unittest.TestCase):
                 args = cli.parse_args(argv)
                 self.assertTrue(callable(args.handler))
 
+    def test_credentials_derive_verify_flag_is_registered(self) -> None:
+        args = cli.parse_args(
+            [
+                "credentials",
+                "derive",
+                "--kind",
+                "hg6142a3-root",
+                "--verify",
+                "--ip",
+                "192.168.1.1",
+                "--mac",
+                "D8F50736BC10",
+            ]
+        )
+
+        self.assertIs(args.handler, cli.command_credentials_derive)
+        self.assertTrue(args.verify)
+        self.assertEqual(args.kind, "hg6142a3-root")
+
 
 if __name__ == "__main__":
     unittest.main()

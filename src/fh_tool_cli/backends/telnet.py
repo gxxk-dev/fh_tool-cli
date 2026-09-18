@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..config_store import decode_text
@@ -33,6 +34,12 @@ class TelnetCredentials:
     username: str | None = None
     password: str | None = None
     timeout: float = 5.0
+    # 登录认证失败时依次重试的备用凭据；命令已发送后的失败不重试。
+    fallback_credentials: tuple["TelnetCredentials", ...] = ()
+
+
+class TelnetLoginError(FHToolError):
+    """Telnet 登录认证失败（区别于连接/命令阶段错误），可换下一组凭据重试。"""
 
 
 class TelnetShell:
@@ -99,35 +106,81 @@ class TelnetShell:
         return output
 
     def _session(self, command: str) -> str:
+        return self._with_login_fallback(
+            lambda credentials: self._session_once(credentials, command)
+        )
+
+    def _session_once(self, credentials: TelnetCredentials, command: str) -> str:
         with socket.create_connection(
-            (self.credentials.host, self.credentials.port),
-            timeout=self.credentials.timeout,
+            (credentials.host, credentials.port),
+            timeout=credentials.timeout,
         ) as sock:
-            sock.settimeout(self.credentials.timeout)
+            sock.settimeout(credentials.timeout)
             reader = _TelnetReader(sock)
-            _authenticate(reader, self.credentials)
+            _authenticate(reader, credentials)
             _send_line(sock, command)
             _send_line(sock, "exit")
             return decode_text(_read_all(sock))
 
     def _root_session(self, command: str, *, su_password: str) -> str:
+        return self._with_login_fallback(
+            lambda credentials: self._root_session_once(
+                credentials, command, su_password=su_password
+            )
+        )
+
+    def _root_session_once(
+        self, credentials: TelnetCredentials, command: str, *, su_password: str
+    ) -> str:
         with socket.create_connection(
-            (self.credentials.host, self.credentials.port),
-            timeout=self.credentials.timeout,
+            (credentials.host, credentials.port),
+            timeout=credentials.timeout,
         ) as sock:
-            sock.settimeout(self.credentials.timeout)
+            sock.settimeout(credentials.timeout)
             reader = _TelnetReader(sock)
-            _authenticate(reader, self.credentials)
+            _authenticate(reader, credentials)
             _send_line(sock, "su root")
             if reader.read_until(_PASSWORD_PROMPTS, stage="su") is None:
-                _warn_prompt_unconfirmed(self.credentials, "su")
+                _warn_prompt_unconfirmed(credentials, "su")
             _send_line(sock, su_password)
             if not reader.wait_shell_prompt(stage="su"):
-                _warn_prompt_unconfirmed(self.credentials, "shell")
+                _warn_prompt_unconfirmed(credentials, "shell")
             _send_line(sock, command)
             _send_line(sock, "exit")
             _send_line(sock, "exit")
             return decode_text(_read_all(sock))
+
+    def _with_login_fallback(self, run_once: Callable[[TelnetCredentials], str]) -> str:
+        """按凭据候选顺序执行会话；仅登录认证失败时换下一候选重连重试。
+
+        命令已发送后的失败不重试（避免重复执行有副作用的命令）。
+        候选用尽且多于一个时，附加派生候选均失败的说明。
+        """
+        attempts = (self.credentials, *self.credentials.fallback_credentials)
+        last_error: TelnetLoginError | None = None
+        for index, credentials in enumerate(attempts):
+            try:
+                return run_once(credentials)
+            except TelnetLoginError as exc:
+                last_error = exc
+                if index + 1 < len(attempts):
+                    log_event(
+                        logging.INFO,
+                        "telnet.login.fallback",
+                        host=credentials.host,
+                        port=credentials.port,
+                        tried_username_present=bool(credentials.username),
+                        next_username_present=bool(attempts[index + 1].username),
+                    )
+                    continue
+        assert last_error is not None
+        if len(attempts) > 1:
+            raise FHToolError(
+                f"{last_error}；自动派生 Telnet 候选"
+                "（HG5143F telnetadmin / HG6142A3 admin）均登录失败，"
+                "请显式提供 --username/--password"
+            ) from last_error
+        raise last_error
 
 
 def _authenticate(reader: _TelnetReader, credentials: TelnetCredentials) -> None:
@@ -306,7 +359,11 @@ def _raise_on_reprompts(stage: str, region: bytes, *, exclude: tuple[bytes, ...]
 def _auth_failure(stage: str, marker: bytes) -> FHToolError:
     reason = marker.decode("ascii", errors="replace")
     log_event(logging.INFO, "telnet.auth.failed", stage=stage, marker=reason)
-    return FHToolError(f"Telnet {stage} failed: {reason}")
+    message = f"Telnet {stage} failed: {reason}"
+    if stage == "login":
+        message += "；若密码非默认公式请显式提供 --username/--password"
+        return TelnetLoginError(message)
+    return FHToolError(message)
 
 
 def _warn_prompt_unconfirmed(credentials: TelnetCredentials, stage: str) -> None:

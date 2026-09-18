@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import io
 import unittest
+from unittest import mock
 from unittest.mock import patch
 
 from fh_tool_cli.account import (
@@ -10,6 +12,7 @@ from fh_tool_cli.account import (
     WEB_ADMIN_PASSWORD_PATH,
     account_show,
     read_secret_from_args,
+    read_stdin_secret,
     set_su_runtime_password,
     set_telnet_password,
 )
@@ -100,10 +103,16 @@ class AccountTests(unittest.TestCase):
             ]
         )
 
-        with patch("fh_tool_cli.cli._telnet_root_shell_runner_from_args", return_value=calls.append):
+        with (
+            patch("fh_tool_cli.cli._telnet_root_shell_runner_from_args", return_value=calls.append),
+            patch(
+                "fh_tool_cli.cli.resolve_su_password_from_shell",
+                return_value=("Fh@36BC10", "verified-telsu:hg5143f-su"),
+            ),
+        ):
             result = args.handler(args)
 
-        self.assertEqual(result["password_source"], "derived-hg5143f-su")
+        self.assertEqual(result["password_source"], "verified-telsu:hg5143f-su")
         self.assertEqual(result["value"], "[REDACTED]")
         self.assertIn(HG5143F_DERIVED_SU_MD5_CRYPT, calls[0])
         self.assertNotIn(HG5143F_DERIVED_SU_PASSWORD, calls[0])
@@ -122,8 +131,38 @@ class AccountTests(unittest.TestCase):
 
         result = args.handler(args)
 
-        self.assertEqual(result["target"]["input_mode"], "derived-hg5143f-su-on-confirm")
+        self.assertEqual(result["target"]["input_mode"], "derived-su-on-confirm")
         self.assertFalse(result["executed"])
+
+
+class ReadStdinSecretTests(unittest.TestCase):
+    def test_tty_input_prints_hint_to_stderr(self) -> None:
+        fake_stdin = io.StringIO("secret-line\n")
+        fake_stdin.isatty = lambda: True  # type: ignore[method-assign]
+        err = io.StringIO()
+
+        with (
+            mock.patch("sys.stdin", fake_stdin),
+            mock.patch("sys.stderr", err),
+        ):
+            value = read_stdin_secret("输入密码：")
+
+        self.assertEqual(value, "secret-line")
+        self.assertIn("输入密码：", err.getvalue())
+
+    def test_piped_input_stays_silent(self) -> None:
+        fake_stdin = io.StringIO("piped-secret\n")
+        fake_stdin.isatty = lambda: False  # type: ignore[method-assign]
+        err = io.StringIO()
+
+        with (
+            mock.patch("sys.stdin", fake_stdin),
+            mock.patch("sys.stderr", err),
+        ):
+            value = read_stdin_secret("输入密码：")
+
+        self.assertEqual(value, "piped-secret")
+        self.assertEqual(err.getvalue(), "")
 
 
 if __name__ == "__main__":

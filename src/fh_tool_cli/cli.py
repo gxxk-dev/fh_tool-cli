@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,6 +13,7 @@ from .account import (
     PasswordInput,
     account_show,
     read_secret_from_args,
+    read_stdin_secret,
     set_su_runtime_password,
     set_telnet_password,
     set_telnet_username,
@@ -66,8 +68,8 @@ from .config_store import (
     save_config,
 )
 from .credential_sources import (
-    complete_hg5143f_telnet_login,
-    derive_hg5143f_su_password_from_args,
+    complete_derived_telnet_login,
+    resolve_su_password_from_shell,
 )
 from .credentials import (
     derive_credentials,
@@ -371,23 +373,50 @@ def command_credentials_derive(args: argparse.Namespace) -> dict[str, Any]:
     mac, mac_source = resolve_mac(args, ip, required=True)
     assert mac is not None
     credentials = derive_credentials(mac, args.kind)
+    verify_source: str | None = None
+    if getattr(args, "verify", False):
+        shell = _telnet_shell_from_args(args)
+        _password, verify_source = resolve_su_password_from_shell(args, ip=ip, shell=shell)
+    rendered_credentials = []
+    if verify_source is not None and verify_source.startswith("verified-telsu:"):
+        verified_kind = verify_source.split(":", 1)[1]
+        for credential in credentials:
+            if credential.target != "su-root-runtime":
+                rendered_credentials.append(credential.render(reveal_secrets=args.reveal_secrets))
+                continue
+            if credential.kind == verified_kind:
+                credential = replace(
+                    credential,
+                    verified=True,
+                    confidence=f"high-{credential.kind}-local-live-verified",
+                )
+            else:
+                credential = replace(credential, verified=False)
+            rendered_credentials.append(credential.render(reveal_secrets=args.reveal_secrets))
+    else:
+        rendered_credentials = [
+            credential.render(reveal_secrets=args.reveal_secrets)
+            for credential in credentials
+        ]
     return {
         "kind": args.kind,
         "ip": ip,
         "ip_source": ip_source,
         "mac_source": mac_source,
-        "credentials": [
-            credential.render(reveal_secrets=args.reveal_secrets)
-            for credential in credentials
-        ],
+        "verify": verify_source,
+        "credentials": rendered_credentials,
     }
 
 
 def _password_from_args(args: argparse.Namespace) -> str | None:
     if getattr(args, "telnet_password_stdin", False):
-        return sys.stdin.readline().rstrip("\n")
+        if getattr(args, "telnet_password", None) is not None:
+            raise CliError("Telnet 密码只能选择 --telnet-password 或 --telnet-password-stdin")
+        return read_stdin_secret("请输入 Telnet 登录密码(--telnet-password-stdin)，回车确认：")
     if getattr(args, "password_stdin", False):
-        return sys.stdin.readline().rstrip("\n")
+        if getattr(args, "password", None) is not None:
+            raise CliError("密码只能选择 --password 或 --password-stdin")
+        return read_stdin_secret("请输入密码(--password-stdin)，回车确认：")
     if getattr(args, "telnet_password", None) is not None:
         return args.telnet_password
     if hasattr(args, "telnet_password"):
@@ -399,19 +428,30 @@ def _telnet_credentials_from_args(args: argparse.Namespace) -> TelnetCredentials
     ip, _ip_source = resolve_ip(args)
     username = getattr(args, "username", None)
     password = _password_from_args(args)
-    username, password = complete_hg5143f_telnet_login(
+    candidates = complete_derived_telnet_login(
         args,
         ip=ip,
         username=username,
         password=password,
     )
+    primary_username, primary_password = candidates[0]
 
     return TelnetCredentials(
         host=ip,
         port=args.telnet_port,
-        username=username,
-        password=password,
+        username=primary_username,
+        password=primary_password,
         timeout=args.timeout,
+        fallback_credentials=tuple(
+            TelnetCredentials(
+                host=ip,
+                port=args.telnet_port,
+                username=fallback_username,
+                password=fallback_password,
+                timeout=args.timeout,
+            )
+            for fallback_username, fallback_password in candidates[1:]
+        ),
     )
 
 
@@ -431,34 +471,34 @@ def _telnet_shell_from_args(args: argparse.Namespace) -> TelnetShell:
     return TelnetShell(_telnet_credentials_from_args(args))
 
 
-def _telnet_root_shell_runner_from_args(args: argparse.Namespace) -> Callable[[str], str]:
+def _telnet_root_shell_runner_from_args(
+    args: argparse.Namespace,
+    *,
+    su_password: tuple[str, str] | None = None,
+) -> Callable[[str], str]:
+    """构造 root shell runner。
+
+    telnet 路径采用惰性验证:未提供 su_password 时,首次真正执行 root 命令前
+    用 admin shell 读 /var/telsu 并本地 crypt 验证候选公式(验证一次后缓存);
+    dry-run 路径不会调用 runner,因此完全不建立 telnet 连接。
+    local-vm backend 本身已是 root,跳过验证。
+    """
     if getattr(args, "backend", "telnet") == "local-vm":
         return LocalVmShell(
             Path(args.vm_root).expanduser(),
             timeout=args.timeout,
         ).run
     ip, _ip_source = resolve_ip(args)
-    su_password = _current_su_password_from_args(args, ip=ip)
     shell = _telnet_shell_from_args(args)
+    resolved = su_password
 
     def run(command: str) -> str:
-        return shell.run_as_root(command, su_password=su_password)
+        nonlocal resolved
+        if resolved is None:
+            resolved = resolve_su_password_from_shell(args, ip=ip, shell=shell)
+        return shell.run_as_root(command, su_password=resolved[0])
 
     return run
-
-
-def _current_su_password_from_args(args: argparse.Namespace, *, ip: str) -> str:
-    has_password = getattr(args, "su_password", None) is not None
-    has_stdin = getattr(args, "su_password_stdin", False)
-    if has_password and has_stdin:
-        raise CliError("当前 su root 密码只能选择 --su-password 或 --su-password-stdin")
-    if has_stdin:
-        if getattr(args, "password_stdin", False) or getattr(args, "telnet_password_stdin", False):
-            raise CliError("--su-password-stdin 不能和其它 stdin 密码选项同时使用")
-        return sys.stdin.readline().rstrip("\n")
-    if has_password:
-        return str(args.su_password)
-    return derive_hg5143f_su_password_from_args(args, ip=ip)
 
 
 def _shell_runner_from_args(args: argparse.Namespace) -> Callable[[str], str]:
@@ -596,14 +636,24 @@ def command_account_set_su_runtime_password(args: argparse.Namespace) -> dict[st
             target={"input_mode": _su_runtime_password_input_mode(args)},
             side_effects={"runtime_password_write": False},
         )
-    secret, password_source = _su_runtime_password_from_args(args)
-    result = set_su_runtime_password(_telnet_root_shell_runner_from_args(args), secret.password)
+    secret, password_source = _su_runtime_password_from_args(
+        args,
+        shell=_telnet_shell_from_args(args),
+    )
+    result = set_su_runtime_password(
+        _telnet_root_shell_runner_from_args(args, su_password=(secret.password, password_source)),
+        secret.password,
+    )
     result["generated"] = secret.generated
     result["password_source"] = password_source
     return result
 
 
-def _su_runtime_password_from_args(args: argparse.Namespace) -> tuple[PasswordInput, str]:
+def _su_runtime_password_from_args(
+    args: argparse.Namespace,
+    *,
+    shell: Any,
+) -> tuple[PasswordInput, str]:
     selected = [
         getattr(args, "password", None) is not None,
         getattr(args, "password_stdin", False),
@@ -617,16 +667,14 @@ def _su_runtime_password_from_args(args: argparse.Namespace) -> tuple[PasswordIn
             return secret, "stdin"
         return secret, "generate"
     ip, _ip_source = resolve_ip(args)
-    return PasswordInput(
-        derive_hg5143f_su_password_from_args(args, ip=ip),
-        generated=False,
-    ), "derived-hg5143f-su"
+    password, source = resolve_su_password_from_shell(args, ip=ip, shell=shell)
+    return PasswordInput(password, generated=False), source
 
 
 def _su_runtime_password_input_mode(args: argparse.Namespace) -> str:
     mode = _password_input_mode(args)
     if mode == "required_on_confirm":
-        return "derived-hg5143f-su-on-confirm"
+        return "derived-su-on-confirm"
     return mode
 
 

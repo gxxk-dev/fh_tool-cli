@@ -92,14 +92,28 @@ fh-tool pppoe-account
 fh-tool pwd-reg-password
 ```
 
-只读派生 HG5143F 管理面凭据候选，默认脱敏：
+只读派生已验证的光猫管理面凭据候选，默认脱敏：
 
 ```bash
 fh-tool credentials derive --mac AABBCCDDEEFF
 fh-tool credentials derive --kind hg5143f-telnet --mac AABBCCDDEEFF
+fh-tool credentials derive --kind hg6142a3-root --mac AABBCCDDEEFF --reveal-secrets
 ```
 
-当前只实现本地验证过的 HG5143F 管理面规则：Telnet 登录候选和 runtime `su root` 候选。Web superadmin、LOID/registration、TR-069/ACS 是配置层存储值，工具通过 `/fh_tool/api`、`cfg_cmd` 或离线配置解密读取并默认脱敏，不把它们当成公式猜测。Wi-Fi SSID/PSK 不属于当前 `fh_tool-cli` 范围。
+当前实现两类本地验证过的规则：
+
+- **HG5143F**：Telnet 登录候选（`telnetadmin` + `FH-nE7jA%5m` + MAC 后 6 位）和 runtime `su root` 候选（`Fh@` + MAC 后 6 位，md5-crypt 写入 `/var/telsu`）；
+- **HG6142A3（中国联通）**：Telnet 登录候选（`admin` + `Fh@` + MAC 后 6 位，登录进 opuser shell，实机多次登录确认）和 runtime `su root` 候选（`hg2x0` + MAC 后 6 位，SHA256-crypt 写入 `/var/telsu`，来自 `protocolmgr` 的 carrier 分支：联通走 `hg2x0`，其它运营商走 `Fh@`，即与 HG5143F 同一公式体系）。
+
+加 `--verify` 会在线用 Telnet 读取 `/var/telsu` 并在本地对 su 候选做 crypt 验证，命中的条目 `verified=true`：
+
+```bash
+fh-tool credentials derive --verify --mac AABBCCDDEEFF
+```
+
+`--verify` 未显式提供 Telnet 凭据时，会按上述两个型号的登录候选依次自动尝试（认证失败换下一个候选重连），HG5143F 与 HG6142A3 都可以零参数完成在线验证。
+
+Web superadmin、LOID/registration、TR-069/ACS 是配置层存储值，工具通过 `/fh_tool/api`、`cfg_cmd` 或离线配置解密读取并默认脱敏，不把它们当成公式猜测。Wi-Fi SSID/PSK 不属于当前 `fh_tool-cli` 范围。
 
 打开 runtime Telnet：
 
@@ -228,7 +242,7 @@ fh-tool web services set --service telnet --enabled 0 --confirm
 
 Web AJAX 写命令 dry-run 不会登录；加 `--confirm` 后，如果没有显式 `--sessionid`，会要求自动登录成功后才发 POST。
 
-Telnet/cfg/诊断命令在未显式传 Telnet 密码时，会默认使用 HG5143F 派生 Telnet 凭据 fallback；显式传入的用户名/密码始终优先。如果设备不是该规则，或需要保留空凭据/自定义认证，可加 `--no-derived-credentials` 关闭。`--use-derived-credentials` 仍作为兼容参数接受：
+Telnet/cfg/诊断命令在未显式传 Telnet 密码时，会默认使用派生 Telnet 凭据 fallback：先试 HG5143F（`telnetadmin` + `FH-nE7jA%5m` + MAC 后缀），认证失败自动换 HG6142A3 候选（`admin` + `Fh@` + MAC 后缀）重连重试；显式传入的 `--username`/`--password` 始终优先（只显式给 `--username admin` 或 `--username telnetadmin` 时会按对应型号公式自动补密码）。显式密码与 `--password-stdin`/`--telnet-password-stdin` 同给会直接报互斥错误。如果设备不属于这两条规则，或需要保留空凭据/自定义认证，可加 `--no-derived-credentials` 关闭。`--use-derived-credentials` 仍作为兼容参数接受：
 
 ```bash
 fh-tool cfg get InternetGatewayDevice.DeviceInfo.Manufacturer
@@ -236,7 +250,7 @@ fh-tool wan list
 fh-tool cfg get InternetGatewayDevice.DeviceInfo.Manufacturer --no-derived-credentials
 ```
 
-需要 root shell 的 Telnet 操作会自动执行 `su root`，当前 su 密码默认按 HG5143F 规则从 MAC 派生；如果 runtime su 密码已经被你改过，可显式传 `--su-password` 或 `--su-password-stdin`。例如 device restore、`cloud disable-cloudclt --confirm`、`account set-su-runtime-password --confirm` 会走 root runner。`account set-su-runtime-password` 写入的是 `/var/telsu` 的 passwd 格式 md5-crypt 行，不会把明文密码写入远端命令。
+需要 root shell 的 Telnet 操作会自动执行 `su root`。未显式提供 su 密码时，工具会先用 admin shell 读取 `/var/telsu`，在本地对已知候选公式（HG5143F `Fh@`+MAC 后缀的 md5-crypt `$1$`、HG6142A3 联通 `hg2x0`+MAC 后缀的 SHA256-crypt `$5$fh$`）做 crypt 验证，命中才使用；读不到 hash 或全部候选不匹配（密码被改过/未知固件公式）时会明确报错，绝不盲猜。验证在首次真正执行 root 命令时进行并缓存，dry-run 不建立 Telnet 连接。如果 runtime su 密码已经被你改过，或想跳过自动验证，可显式传 `--su-password` 或 `--su-password-stdin`。例如 device restore、`cloud disable-cloudclt --confirm`、`account set-su-runtime-password --confirm` 会走 root runner。`account set-su-runtime-password` 未显式给新密码时默认按验证出的同公式重置，写入的是 `/var/telsu` 的 passwd 格式 md5-crypt 行，不会把明文密码写入远端命令。
 
 诊断命令保持只读；`ip status` 这类依赖 VM/userspace 工具的命令会分别标记每个 probe 的 `ok/output/error`，工具缺失时输出 `partial_failure=true`，不会吞掉其它已成功字段。
 

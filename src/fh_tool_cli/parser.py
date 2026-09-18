@@ -151,7 +151,10 @@ def add_telnet_options(
         action="store_true",
         help="关闭默认 HG5143F 派生 Telnet 凭据 fallback",
     )
-    parser.add_argument("--su-password", help="当前 su root 密码；未提供时默认使用 HG5143F 派生候选")
+    parser.add_argument(
+        "--su-password",
+        help="当前 su root 密码；未提供时自动读取 /var/telsu hash 验证候选公式，无法验证时必须显式提供",
+    )
     parser.add_argument("--su-password-stdin", action="store_true", help="从 stdin 读取当前 su root 密码")
 
 
@@ -315,12 +318,17 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
         "derive",
         help="按已验证规则派生凭据候选，默认脱敏",
     )
-    add_common_options(credentials_derive)
+    add_telnet_options(credentials_derive)
     credentials_derive.add_argument(
         "--kind",
         choices=DERIVED_CREDENTIAL_KINDS,
         default="all",
         help="派生规则，默认 all",
+    )
+    credentials_derive.add_argument(
+        "--verify",
+        action="store_true",
+        help="在线读取 /var/telsu 并本地 crypt 验证 su 候选（需要 Telnet 登录）",
     )
     credentials_derive.add_argument("--reveal-secrets", action="store_true", help="输出派生明文")
     credentials_derive.set_defaults(handler=_handler(handlers, "command_credentials_derive"))

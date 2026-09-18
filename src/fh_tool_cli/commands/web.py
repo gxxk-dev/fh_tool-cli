@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ..account import WEB_ADMIN_PASSWORD_PATH
+from ..account import WEB_ADMIN_PASSWORD_PATH, read_stdin_secret
 from ..argparse_utils import parse_json_object, parse_kv
 from ..backends.cfg_cmd import CfgCmdBackend
 from ..backends.fh_tool import FH_TOOL_API_PATH, api_payload, fh_tool_call, resolve_fh_port
@@ -15,7 +15,7 @@ from ..backends.local_vm import DEFAULT_VM_ROOT, LocalVmShell
 from ..backends.telnet import TelnetCredentials, TelnetShell
 from ..backends.web_ajax import DEFAULT_AJAX_PATH, DEFAULT_WEB_LOGIN_PORT, WebAjaxClient
 from ..config_store import DEFAULT_CONFIG_PATH, normalize_ip, resolve_ip, resolve_mac
-from ..credential_sources import complete_hg5143f_telnet_login
+from ..credential_sources import complete_derived_telnet_login
 from ..errors import CliError, FHToolError
 from ..risk import dry_run_notice, is_confirmed
 from ..web_discovery import (
@@ -234,15 +234,18 @@ def _web_telnet_login_from_args(
     username = getattr(args, "telnet_username", None)
     password: str | None = None
     if has_stdin:
-        password = sys.stdin.readline().rstrip("\n")
+        password = read_stdin_secret(
+            "请输入 Telnet 登录密码(--telnet-password-stdin)，回车确认："
+        )
     elif has_password:
         password = str(args.telnet_password)
-    return complete_hg5143f_telnet_login(
+    candidates = complete_derived_telnet_login(
         args,
         ip=ip,
         username=username,
         password=password,
     )
+    return candidates[0]
 
 
 def _extract_password_from_mapping(value: Any) -> str | None:
