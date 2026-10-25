@@ -30,13 +30,14 @@ CLI 入口使用 Click，错误和日志输出使用 Rich。命令结果只写 s
 
 ```bash
 fh-tool --verbose probe --json
+fh-tool probe --json -v          # 日志开关也可以放在子命令后
 fh-tool --quiet config show
 fh-tool --log-file fh-tool.log dev-info
 ```
 
 `--json` 输出稳定的 machine-readable JSON，不混入日志或样式。当前默认人类输出仍保持 pretty JSON，以兼容已有脚本；后续可以在不影响 `--json` 的前提下逐步增加表格化输出。
 
-`--log-file` 写入 JSON lines 结构化日志；`-v/-vv` 控制 info/debug 事件，`-q` 只保留 error 级别。日志只记录 command、HTTP method、状态码、cfg path、风险等级等元数据，密码、session、token、LOID、PPPoE 等字段会脱敏。
+`--log-file` 写入 JSON lines 结构化日志；`-v/-vv` 控制 info/debug 事件，`-q` 只保留 error 级别。`-v` 会记录每次 fh_tool 请求的端口/路径/耗时，以及 HTTP 错误和“响应解密失败”时的响应体预览（HTML 原文截断、明文 JSON 递归脱敏、可疑文本隐藏）；`-vv` 额外输出解密后的完整响应。密码、session、token、LOID、PPPoE 等字段始终脱敏。
 
 ## 快速配置
 

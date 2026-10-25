@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 import click
+from click.core import ParameterSource
 
 from .errors import CliError, FHToolError
 from .output import configure_logging, emit, emit_cancelled, emit_error, log_event
@@ -17,6 +18,28 @@ CONTEXT_SETTINGS = {
     "help_option_names": ["-h", "--help"],
     "ignore_unknown_options": False,
 }
+
+_LOGGING_OPTION_NAMES = ("verbose", "quiet", "log_file")
+
+
+def _logging_options() -> list[click.Option]:
+    """日志开关；每层命令都注册，使其可放在子命令前后任意位置。"""
+    return [
+        click.Option(
+            ["-v", "--verbose"],
+            count=True,
+            help="增加日志详细度，可重复（-v 信息级，-vv 含解密后响应）",
+        ),
+        click.Option(
+            ["-q", "--quiet"],
+            count=True,
+            help="减少非结果输出",
+        ),
+        click.Option(
+            ["--log-file"],
+            help="写入日志文件（JSON lines）",
+        ),
+    ]
 
 
 class FHToolClickError(click.ClickException):
@@ -59,30 +82,6 @@ def build_click_cli(handlers: HandlerMap) -> click.Group:
     command = _command_from_parser(parser, name="fh-tool", fixed={}, help_text=parser.description)
     if not isinstance(command, click.Group):
         raise TypeError("root parser must produce a Click group")
-
-    command.params.insert(
-        0,
-        click.Option(
-            ["--log-file"],
-            help="写入日志文件",
-        ),
-    )
-    command.params.insert(
-        0,
-        click.Option(
-            ["-q", "--quiet"],
-            count=True,
-            help="减少非结果输出",
-        ),
-    )
-    command.params.insert(
-        0,
-        click.Option(
-            ["-v", "--verbose"],
-            count=True,
-            help="增加日志详细度，可重复",
-        ),
-    )
     return command
 
 
@@ -115,6 +114,7 @@ def _command_from_parser(
     subparsers = _subparsers_action(parser)
     params = [_parameter_from_action(action) for action in _parser_parameter_actions(parser)]
     params = [param for param in params if param is not None]
+    params = _logging_options() + params
 
     if subparsers is None:
         return click.Command(
@@ -151,7 +151,7 @@ def _command_from_parser(
 def _parent_callback(fixed: dict[str, Any]) -> Callable[..., None]:
     @click.pass_context
     def callback(ctx: click.Context, **kwargs: Any) -> None:
-        _configure_logging_from_kwargs(kwargs)
+        _configure_logging_from_kwargs(ctx, kwargs)
         state = ctx.ensure_object(dict)
         state.update(fixed)
         state.update(_normalize_click_values(kwargs))
@@ -162,7 +162,7 @@ def _parent_callback(fixed: dict[str, Any]) -> Callable[..., None]:
 def _group_callback(parser: argparse.ArgumentParser, fixed: dict[str, Any]) -> Callable[..., int | None]:
     @click.pass_context
     def callback(ctx: click.Context, **kwargs: Any) -> int | None:
-        _configure_logging_from_kwargs(kwargs)
+        _configure_logging_from_kwargs(ctx, kwargs)
         state = ctx.ensure_object(dict)
         state.update(fixed)
         state.update(_normalize_click_values(kwargs))
@@ -176,6 +176,7 @@ def _group_callback(parser: argparse.ArgumentParser, fixed: dict[str, Any]) -> C
 def _leaf_callback(parser: argparse.ArgumentParser, fixed: dict[str, Any]) -> Callable[..., int]:
     @click.pass_context
     def callback(ctx: click.Context, **kwargs: Any) -> int:
+        _configure_logging_from_kwargs(ctx, kwargs)
         state = ctx.ensure_object(dict)
         state.update(fixed)
         state.update(_normalize_click_values(kwargs))
@@ -184,13 +185,23 @@ def _leaf_callback(parser: argparse.ArgumentParser, fixed: dict[str, Any]) -> Ca
     return callback
 
 
-def _configure_logging_from_kwargs(kwargs: dict[str, Any]) -> None:
-    if not {"verbose", "quiet", "log_file"} & set(kwargs):
+def _configure_logging_from_kwargs(ctx: click.Context, kwargs: dict[str, Any]) -> None:
+    """把当前层的 -v/-q/--log-file 合并进 ctx.meta 后统一配置日志。
+
+    每层命令都注册了日志开关，这里只采用用户显式写在命令行上的值，避免子命令
+    的默认值把父级配置（例如写在命令前的 -vv）覆盖回 WARNING。
+    """
+    available = set(_LOGGING_OPTION_NAMES) & set(kwargs)
+    if not available:
         return
+    for name in available:
+        value = kwargs.pop(name)
+        if ctx.get_parameter_source(name) is ParameterSource.COMMANDLINE:
+            ctx.meta[name] = value
     configure_logging(
-        verbose=int(kwargs.pop("verbose", 0) or 0),
-        quiet=int(kwargs.pop("quiet", 0) or 0),
-        log_file=kwargs.pop("log_file", None),
+        verbose=int(ctx.meta.get("verbose", 0) or 0),
+        quiet=int(ctx.meta.get("quiet", 0) or 0),
+        log_file=ctx.meta.get("log_file"),
     )
 
 

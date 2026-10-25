@@ -19,6 +19,7 @@ from fh_tool_cli.backends.fh_tool import (
     fh_tool_call,
     probe_fh_port_candidates,
     resolve_fh_port,
+    response_body_preview,
 )
 from fh_tool_cli.client import make_download_url
 from fh_tool_cli.crypto import derive_crypto, encrypt_payload
@@ -269,6 +270,76 @@ class ClassifyResponseBodyTests(unittest.TestCase):
 
     def test_plain_text_body(self) -> None:
         self.assertEqual(classify_response_body("400 Bad Request"), "text")
+
+
+class ResponseBodyPreviewTests(unittest.TestCase):
+    def test_empty_body_has_empty_preview(self) -> None:
+        self.assertEqual(response_body_preview("", "empty"), "")
+
+    def test_html_preview_is_truncated_but_readable(self) -> None:
+        preview = response_body_preview("<html><title>403 Forbidden</title></html>", "html")
+        self.assertIn("403 Forbidden", preview)
+
+    def test_json_preview_redacts_sensitive_keys(self) -> None:
+        preview = response_body_preview('{"adminpwd": "secret", "result": 0}', "json")
+        self.assertIn("[REDACTED]", preview)
+        self.assertNotIn("secret", preview)
+
+    def test_text_with_assignment_is_hidden(self) -> None:
+        self.assertEqual(response_body_preview("adminpwd=secret", "text"), "[文本内容已隐藏]")
+
+    def test_safe_text_is_shown(self) -> None:
+        self.assertEqual(response_body_preview("400 Bad Request", "text"), "400 Bad Request")
+
+    def test_long_preview_is_truncated(self) -> None:
+        preview = response_body_preview("x" * 400, "base64")
+        self.assertLess(len(preview), 400)
+        self.assertIn("chars", preview)
+
+
+class FhToolLogTests(unittest.TestCase):
+    def _records(self, captured) -> list:
+        return captured.records
+
+    def _fields(self, record) -> dict:
+        return getattr(record, "structured_fields", {})
+
+    def test_decrypt_error_logs_body_preview(self) -> None:
+        response = _FakeResponse(
+            status_code=200,
+            text="<html><title>login</title></html>",
+            headers={"Content-Type": "text/html"},
+        )
+        with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=response):
+            with self.assertLogs("fh_tool_cli", level="INFO") as captured:
+                with self.assertRaises(FHToolResponseError):
+                    fh_tool_call(TEST_IP, TEST_MAC, api_payload("GetDevInfo"), 1.0)
+        decrypt_events = [
+            self._fields(item)
+            for item in self._records(captured)
+            if getattr(item, "event", None) == "fh_tool.api.decrypt_error"
+        ]
+        self.assertEqual(len(decrypt_events), 1)
+        self.assertEqual(decrypt_events[0]["body_kind"], "html")
+        self.assertIn("login", decrypt_events[0]["body_preview"])
+        self.assertIn("elapsed_ms", decrypt_events[0])
+
+    def test_debug_result_log_redacts_password(self) -> None:
+        crypto = derive_crypto(TEST_MAC)
+        response = _FakeResponse(
+            status_code=200,
+            text=encrypt_payload({"result": 0, "adminpwd": "secret"}, crypto),
+        )
+        with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=response):
+            with self.assertLogs("fh_tool_cli", level="DEBUG") as captured:
+                fh_tool_call(TEST_IP, TEST_MAC, api_payload("GetAdminAccount"), 1.0)
+        result_events = [
+            self._fields(item)
+            for item in self._records(captured)
+            if getattr(item, "event", None) == "fh_tool.api.result"
+        ]
+        self.assertEqual(len(result_events), 1)
+        self.assertEqual(result_events[0]["response"]["adminpwd"], "[REDACTED]")
 
 
 class FhToolErrorDetailTests(unittest.TestCase):

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import logging
+import re
+import time
 from typing import Any, NamedTuple
 
 import requests
@@ -20,7 +23,7 @@ from ..fh_endpoints import (
     TOOL_DOWNLOAD_PATH,
     fh_tool_url,
 )
-from ..output import log_event
+from ..output import log_event, redact_log_fields
 
 
 class FhPaths(NamedTuple):
@@ -75,6 +78,39 @@ def classify_response_body(body: str) -> str:
     return "text"
 
 
+_RESPONSE_PREVIEW_LIMIT = 240
+# 普通文本只在形态安全时展示;出现 "=" 等赋值符号可能是凭据回显,一律隐藏。
+_TEXT_PREVIEW_SAFE_RE = re.compile(r"^[A-Za-z0-9 .,;:!?/()\[\]{}'\"<>_+%#@&*\-]{0,120}$")
+
+
+def _truncate_preview(text: str, limit: int = _RESPONSE_PREVIEW_LIMIT) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit]}…(+{len(compact) - limit} chars)"
+
+
+def response_body_preview(body: str, body_kind: str) -> str:
+    """生成可安全写入日志的响应预览。
+
+    明文 JSON 可能是设备返回的配置（含 adminpwd 等），先递归脱敏再序列化；
+    普通文本无法可靠区分是否含凭据，只在形态安全时展示。密文与 HTML 原样截断。
+    """
+    if body_kind == "empty":
+        return ""
+    if body_kind == "json":
+        try:
+            parsed = json.loads(body)
+        except Exception:  # noqa: BLE001 - 分类器已判定 json,解析失败时保守隐藏
+            return "[JSON 解析失败，内容已隐藏]"
+        return _truncate_preview(
+            json.dumps(redact_log_fields(parsed), ensure_ascii=False, sort_keys=True)
+        )
+    if body_kind == "text" and not _TEXT_PREVIEW_SAFE_RE.match(" ".join(body.split())):
+        return "[文本内容已隐藏]"
+    return _truncate_preview(body)
+
+
 def fh_tool_call(
     ip: str,
     mac: str,
@@ -88,7 +124,16 @@ def fh_tool_call(
     encrypted = encrypt_payload(payload, crypto)
     url = fh_tool_url(ip, port, path)
     func = str(payload.get("func", "unknown"))
-    log_event(logging.INFO, "fh_tool.api.request", ip=ip, port=port, path=path, func=func)
+    log_event(
+        logging.INFO,
+        "fh_tool.api.request",
+        ip=ip,
+        port=port,
+        path=path,
+        func=func,
+        request_bytes=len(encrypted),
+    )
+    started = time.monotonic()
     try:
         response = requests.post(
             url,
@@ -101,17 +146,34 @@ def fh_tool_call(
             allow_redirects=False,
         )
     except requests.RequestException as exc:
-        log_event(logging.INFO, "fh_tool.api.error", ip=ip, path=path, func=func, error=str(exc))
+        log_event(
+            logging.INFO,
+            "fh_tool.api.error",
+            ip=ip,
+            port=port,
+            path=path,
+            func=func,
+            error=str(exc),
+            elapsed_ms=round((time.monotonic() - started) * 1000, 1),
+        )
         raise FHToolError(f"无法连接 {url}: {exc}") from exc
+    elapsed_ms = round((time.monotonic() - started) * 1000, 1)
 
     if response.status_code != 200:
+        body_kind = classify_response_body(response.text)
         log_event(
             logging.INFO,
             "fh_tool.api.http_error",
             ip=ip,
+            port=port,
             path=path,
             func=func,
             status_code=response.status_code,
+            content_type=response.headers.get("Content-Type"),
+            body_kind=body_kind,
+            body_length=len(response.text or ""),
+            body_preview=response_body_preview(response.text or "", body_kind),
+            elapsed_ms=elapsed_ms,
         )
         raise FHToolHttpError(
             f"{path} 返回 HTTP {response.status_code}",
@@ -135,6 +197,8 @@ def fh_tool_call(
             content_type=content_type,
             body_kind=body_kind,
             body_length=body_length,
+            body_preview=response_body_preview(response.text or "", body_kind),
+            elapsed_ms=elapsed_ms,
         )
         raise FHToolResponseError(
             "响应解密失败："
@@ -153,11 +217,17 @@ def fh_tool_call(
         logging.INFO,
         "fh_tool.api.response",
         ip=ip,
+        port=port,
         path=path,
         func=func,
         status_code=response.status_code,
         result=result.get("result") if isinstance(result, dict) else None,
+        body_length=len(response.text or ""),
+        elapsed_ms=elapsed_ms,
     )
+    if logging.getLogger("fh_tool_cli").isEnabledFor(logging.DEBUG):
+        # 解密后的完整响应只在 -vv 输出；log_event 会按 password/token 等字段名脱敏。
+        log_event(logging.DEBUG, "fh_tool.api.result", func=func, response=result)
     return result
 
 

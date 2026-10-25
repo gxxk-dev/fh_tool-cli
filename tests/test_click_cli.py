@@ -88,6 +88,25 @@ class ClickCliTests(unittest.TestCase):
             self.assertIn("event", first)
             self.assertEqual(first["logger"], "fh_tool_cli")
 
+    def test_logging_flags_are_accepted_after_subcommand(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_file = Path(temp_dir) / "after-subcommand.log"
+
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                exit_code = cli.main(
+                    ["config", "show", "--json", "-vv", "--log-file", str(log_file)]
+                )
+
+            self.assertEqual(exit_code, 0)
+            json.loads(stdout.getvalue())
+            lines = [
+                json.loads(line)
+                for line in log_file.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertTrue(any(line.get("event") == "cli.command.start" for line in lines))
+
 
 if __name__ == "__main__":
     unittest.main()
