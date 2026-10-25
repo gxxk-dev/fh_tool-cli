@@ -83,7 +83,7 @@ class CredentialsTests(unittest.TestCase):
             ],
         )
 
-    def test_hg6142a3_root_derivation_uses_unicom_prefix(self) -> None:
+    def test_hg6142a3_root_derivation_uses_hg2x0_prefix(self) -> None:
         credential = derive_hg6142a3_root("D8F50736BC10")
 
         self.assertEqual(credential.kind, "hg6142a3-root")
@@ -94,6 +94,8 @@ class CredentialsTests(unittest.TestCase):
         self.assertEqual(credential.integration_level, "derive-display-only")
         self.assertIsNone(credential.verified)
         self.assertIn("CHINA_UNICOM", credential.note)
+        self.assertIn("HG5143F", credential.note)
+        self.assertIn("WKE2.094.411", credential.note)
 
     def test_su_password_candidates_are_ordered(self) -> None:
         candidates = su_password_candidates("D8F50736BC10")

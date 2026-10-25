@@ -137,21 +137,24 @@ def derive_hg6142a3_root(mac: str) -> DerivedCredential:
         username="root",
         password=f"{HG6142A3_SU_PASSWORD_PREFIX}{suffix}",
         source=(
-            "HG6142A3 protocolmgr China Unicom branch formula: "
-            "'hg2x0' + brmac suffix (uppercase)"
+            "protocolmgr su formula: 'hg2x0' + brmac suffix (uppercase); "
+            "observed on HG6142A3 (China Unicom) and HG5143F (China Mobile)"
         ),
         mac=normalized,
         mac_suffix=suffix,
         persistent=False,
         target="su-root-runtime",
-        confidence="medium-hg6142a3-formula-confirmed",
+        confidence="high-hg6142a3-hg5143f-formula-confirmed",
         integration_level="derive-display-only",
         note=(
-            "Root su credential derived by protocolmgr (carrier==CHINA_UNICOM branch) "
-            "into /var/telsu as SHA256-crypt crypt(password, '$5$fh$'); runtime only, "
-            "rebuilt on service start. Static disassembly, /var/telsu hash comparison "
-            "and live 'su root' all verified on HG6142A3 V03.00.M0000 (China Unicom). "
-            "Non-Unicom carriers use the 'Fh@' prefix (hg5143f-su formula) instead."
+            "Root su credential derived by protocolmgr into /var/telsu; runtime only, "
+            "rebuilt on service start. On HG6142A3 V03.00.M0000 (China Unicom) it is "
+            "the CHINA_UNICOM carrier branch, confirmed by static disassembly, "
+            "/var/telsu hash comparison and live 'su root'. Independently observed on "
+            "HG5143F WKE2.094.411 (China Mobile): decompiled firmware writes 'hg2x0' "
+            "+ brmac suffix to /var/telsu, and the reporter logged in as root with it. "
+            "Carrier is not a reliable discriminator across models; the tool tries "
+            "both the 'Fh@' and 'hg2x0' candidates and verifies against /var/telsu."
         ),
     )
 
@@ -191,8 +194,9 @@ def telnet_login_candidates(mac: str) -> list[tuple[str, str, str]]:
 def su_password_candidates(mac: str) -> list[tuple[str, str]]:
     """已知 su root 公式候选,顺序固定(HG5143F 优先)。
 
-    前缀由 carrier 分支决定:CHINA_UNICOM -> hg2x0,其它 -> Fh@。
-    MAC 后缀沿用 normalize_mac 的大写十六进制(两台实机验证均为大写)。
+    两个前缀都有独立实机/固件证据,且同一前缀可能出现在不同型号/运营商上,
+    因此不按 carrier 猜测,而是逐候选与 /var/telsu hash 对照。
+    MAC 后缀沿用 normalize_mac 的大写十六进制(实机验证均为大写)。
     """
     suffix = mac_suffix(normalize_mac(mac))
     return [
