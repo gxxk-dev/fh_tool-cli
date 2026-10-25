@@ -1130,7 +1130,8 @@ def command_raw_call(args: argparse.Namespace) -> dict[str, Any]:
 def command_download_url(args: argparse.Namespace) -> dict[str, Any]:
     ip, ip_source = resolve_ip(args)
     mac, _mac_source = resolve_mac(args, ip, required=False, allow_prompt=False)
-    fh_port, fh_port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout)
+    fh_paths = fh_paths_from_args(args)
+    fh_port, fh_port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout, path=fh_paths.api)
     return {
         "ip": ip,
         "ip_source": ip_source,

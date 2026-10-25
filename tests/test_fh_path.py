@@ -110,7 +110,10 @@ class ResolveFhPortPathTests(unittest.TestCase):
     def test_custom_path_is_passed_to_verification(self) -> None:
         with (
             patch("fh_tool_cli.backends.fh_tool.tcp_open", side_effect=[False, True]),
-            patch("fh_tool_cli.backends.fh_tool.verify_fh_tool_port", return_value=True) as verify_mock,
+            patch(
+                "fh_tool_cli.backends.fh_tool.check_fh_tool_port",
+                return_value=(True, False),
+            ) as verify_mock,
         ):
             resolve_fh_port(_args(), TEST_IP, mac=TEST_MAC, timeout=1.0, path="/custom/api")
         verify_mock.assert_called_once_with(TEST_IP, 80, TEST_MAC, 1.0, path="/custom/api")

@@ -14,13 +14,15 @@ from fh_tool_cli.argparse_utils import normalize_port
 from fh_tool_cli.backends.fh_tool import (
     api_payload,
     call_method,
+    check_fh_tool_port,
+    classify_response_body,
     fh_tool_call,
     probe_fh_port_candidates,
     resolve_fh_port,
 )
 from fh_tool_cli.client import make_download_url
 from fh_tool_cli.crypto import derive_crypto, encrypt_payload
-from fh_tool_cli.errors import FHToolError
+from fh_tool_cli.errors import FHToolError, FHToolHttpError, FHToolResponseError
 
 TEST_IP = "192.168.1.1"
 TEST_MAC = "AABBCCDDEEFF"
@@ -79,7 +81,43 @@ class ResolveFhPortTests(unittest.TestCase):
             )
 
     def test_default_8080_when_tcp_open(self) -> None:
-        with patch("fh_tool_cli.backends.fh_tool.tcp_open", return_value=True) as tcp_mock:
+        with (
+            patch("fh_tool_cli.backends.fh_tool.tcp_open", return_value=True) as tcp_mock,
+            patch(
+                "fh_tool_cli.backends.fh_tool.check_fh_tool_port",
+                return_value=(True, False),
+            ) as check_mock,
+        ):
+            self.assertEqual(
+                resolve_fh_port(_args(), TEST_IP, mac=TEST_MAC, timeout=1.0),
+                (8080, "default"),
+            )
+        tcp_mock.assert_called_once_with(TEST_IP, 8080, 1.0)
+        check_mock.assert_called_once_with(TEST_IP, 8080, TEST_MAC, 1.0, path="/fh_tool/api")
+
+    def test_8080_wrong_service_switches_to_verified_candidate(self) -> None:
+        # 8080 是 Web UI（200 但响应体不是密文）、fh_tool API 在 80：必须自动换端口。
+        with (
+            patch("fh_tool_cli.backends.fh_tool.tcp_open", side_effect=[True, True]),
+            patch(
+                "fh_tool_cli.backends.fh_tool.check_fh_tool_port",
+                side_effect=[(False, True), (True, False)],
+            ),
+        ):
+            self.assertEqual(
+                resolve_fh_port(_args(), TEST_IP, mac=TEST_MAC, timeout=1.0),
+                (80, "auto_detected"),
+            )
+
+    def test_8080_api_error_keeps_default_port(self) -> None:
+        # HTTP 500 等 API 自身错误说明端口选对了，不应触发换端口。
+        with (
+            patch("fh_tool_cli.backends.fh_tool.tcp_open", return_value=True) as tcp_mock,
+            patch(
+                "fh_tool_cli.backends.fh_tool.check_fh_tool_port",
+                return_value=(False, False),
+            ),
+        ):
             self.assertEqual(
                 resolve_fh_port(_args(), TEST_IP, mac=TEST_MAC, timeout=1.0),
                 (8080, "default"),
@@ -89,36 +127,53 @@ class ResolveFhPortTests(unittest.TestCase):
     def test_fallback_detected_by_getdevinfo(self) -> None:
         with (
             patch("fh_tool_cli.backends.fh_tool.tcp_open", side_effect=[False, True]),
-            patch("fh_tool_cli.backends.fh_tool.verify_fh_tool_port", return_value=True) as verify_mock,
+            patch(
+                "fh_tool_cli.backends.fh_tool.check_fh_tool_port",
+                return_value=(True, False),
+            ) as check_mock,
         ):
             self.assertEqual(
                 resolve_fh_port(_args(), TEST_IP, mac=TEST_MAC, timeout=1.0),
                 (80, "auto_detected"),
             )
-        verify_mock.assert_called_once_with(TEST_IP, 80, TEST_MAC, 1.0, path="/fh_tool/api")
+        check_mock.assert_called_once_with(TEST_IP, 80, TEST_MAC, 1.0, path="/fh_tool/api")
 
-    def test_fallback_detected_by_surface_when_getdevinfo_fails(self) -> None:
+    def test_fallback_requires_getdevinfo_when_mac_known(self) -> None:
+        # 有 MAC 时不再用“任意 HTTP 响应”兜底，避免选中 80 上的 Web UI。
         with (
             patch("fh_tool_cli.backends.fh_tool.tcp_open", side_effect=[False, True]),
-            patch("fh_tool_cli.backends.fh_tool.verify_fh_tool_port", return_value=False),
-            patch("fh_tool_cli.backends.fh_tool.requests.get", return_value=_FakeResponse(404)),
+            patch(
+                "fh_tool_cli.backends.fh_tool.check_fh_tool_port",
+                return_value=(False, True),
+            ),
+            patch("fh_tool_cli.backends.fh_tool.requests.get") as get_mock,
         ):
             self.assertEqual(
                 resolve_fh_port(_args(), TEST_IP, mac=TEST_MAC, timeout=1.0),
+                (8080, "default_unverified"),
+            )
+        get_mock.assert_not_called()
+
+    def test_fallback_uses_surface_without_mac(self) -> None:
+        with (
+            patch("fh_tool_cli.backends.fh_tool.tcp_open", side_effect=[False, True]),
+            patch("fh_tool_cli.backends.fh_tool.requests.get", return_value=_FakeResponse(404)),
+        ):
+            self.assertEqual(
+                resolve_fh_port(_args(), TEST_IP, mac=None, timeout=1.0),
                 (80, "auto_detected"),
             )
 
     def test_fallback_skips_candidate_when_surface_unreachable(self) -> None:
         with (
             patch("fh_tool_cli.backends.fh_tool.tcp_open", side_effect=[False, True]),
-            patch("fh_tool_cli.backends.fh_tool.verify_fh_tool_port", return_value=False),
             patch(
                 "fh_tool_cli.backends.fh_tool.requests.get",
                 side_effect=requests.ConnectionError("refused"),
             ),
         ):
             self.assertEqual(
-                resolve_fh_port(_args(), TEST_IP, mac=TEST_MAC, timeout=1.0),
+                resolve_fh_port(_args(), TEST_IP, mac=None, timeout=1.0),
                 (8080, "default_unverified"),
             )
 
@@ -167,6 +222,85 @@ class MakeDownloadUrlTests(unittest.TestCase):
 
     def test_absolute_url_is_untouched(self) -> None:
         self.assertEqual(make_download_url(TEST_IP, "http://example.com/file.bin", port=80), "http://example.com/file.bin")
+
+
+class CheckFhToolPortTests(unittest.TestCase):
+    def test_ok_when_getdevinfo_succeeds(self) -> None:
+        with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=_encrypted_ok_response()):
+            self.assertEqual(check_fh_tool_port(TEST_IP, 8080, TEST_MAC, 1.0), (True, False))
+
+    def test_html_200_marks_wrong_service(self) -> None:
+        response = _FakeResponse(200, "<html>web ui</html>", {"Content-Type": "text/html"})
+        with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=response):
+            self.assertEqual(check_fh_tool_port(TEST_IP, 8080, TEST_MAC, 1.0), (False, True))
+
+    def test_http_404_marks_wrong_service(self) -> None:
+        with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=_FakeResponse(404)):
+            self.assertEqual(check_fh_tool_port(TEST_IP, 8080, TEST_MAC, 1.0), (False, True))
+
+    def test_http_500_keeps_port(self) -> None:
+        with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=_FakeResponse(500)):
+            self.assertEqual(check_fh_tool_port(TEST_IP, 8080, TEST_MAC, 1.0), (False, False))
+
+    def test_connection_error_keeps_port(self) -> None:
+        with patch(
+            "fh_tool_cli.backends.fh_tool.requests.post",
+            side_effect=requests.ConnectionError("refused"),
+        ):
+            self.assertEqual(check_fh_tool_port(TEST_IP, 8080, TEST_MAC, 1.0), (False, False))
+
+
+class ClassifyResponseBodyTests(unittest.TestCase):
+    def test_empty_body(self) -> None:
+        self.assertEqual(classify_response_body("  \r\n"), "empty")
+
+    def test_html_body(self) -> None:
+        self.assertEqual(classify_response_body("<!DOCTYPE html><html>login</html>"), "html")
+
+    def test_plaintext_json_body(self) -> None:
+        self.assertEqual(classify_response_body('{"result":0}'), "json")
+
+    def test_base64_ciphertext_body(self) -> None:
+        self.assertEqual(classify_response_body(encrypt_payload({"result": 0}, derive_crypto(TEST_MAC))), "base64")
+
+    def test_short_base64_is_text(self) -> None:
+        # 不是 AES 块长度的 base64 不是 fh_tool 密文,归入普通文本。
+        self.assertEqual(classify_response_body("QUJD"), "text")
+
+    def test_plain_text_body(self) -> None:
+        self.assertEqual(classify_response_body("400 Bad Request"), "text")
+
+
+class FhToolErrorDetailTests(unittest.TestCase):
+    def test_http_error_carries_status_code(self) -> None:
+        with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=_FakeResponse(500)):
+            with self.assertRaises(FHToolHttpError) as ctx:
+                fh_tool_call(TEST_IP, TEST_MAC, api_payload("GetDevInfo"), 1.0)
+        self.assertEqual(ctx.exception.status_code, 500)
+
+    def test_decrypt_error_classifies_html_body(self) -> None:
+        response = _FakeResponse(
+            status_code=200,
+            text="<html><body>web ui</body></html>",
+            headers={"Content-Type": "text/html"},
+        )
+        with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=response):
+            with self.assertRaises(FHToolResponseError) as ctx:
+                fh_tool_call(TEST_IP, TEST_MAC, api_payload("GetDevInfo"), 1.0)
+        error = ctx.exception
+        self.assertEqual(error.body_kind, "html")
+        self.assertEqual(error.content_type, "text/html")
+        self.assertIn("HTML", str(error))
+        self.assertIn("fh_tool API", str(error))
+        self.assertIn("HTTP 400", str(error))
+
+    def test_decrypt_error_classifies_empty_body(self) -> None:
+        response = _FakeResponse(status_code=200, text="")
+        with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=response):
+            with self.assertRaises(FHToolResponseError) as ctx:
+                fh_tool_call(TEST_IP, TEST_MAC, api_payload("GetAdminAccount"), 1.0)
+        self.assertEqual(ctx.exception.body_kind, "empty")
+        self.assertIn("疑似空响应", str(ctx.exception))
 
 
 class CallMethodTests(unittest.TestCase):

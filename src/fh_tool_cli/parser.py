@@ -40,7 +40,7 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
         "--fh-port",
         type=normalize_port,
         default=None,
-        help="fh_tool API 端口；默认先 8080，TCP 不可达时自动探测候选端口（如 80）。显式指定后跳过探测",
+        help="fh_tool API 端口；默认先 8080，未通过 GetDevInfo 校验或 TCP 不可达时自动探测候选端口（如 80）。显式指定后跳过探测",
     )
     parser.add_argument(
         "--fh-api-path",

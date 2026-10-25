@@ -5,7 +5,8 @@ from __future__ import annotations
 # backends.fh_tool 导入 client.tcp_open，而 client.py 需要这里的默认端口。
 
 DEFAULT_FH_TOOL_PORT = 8080
-# 8080 TCP 不可达时依次尝试的候选端口；HG6142A3 V03.00.M0000 实测 fh_tool API 在 80 端口。
+# 8080 TCP 不可达、或 8080 上的 /fh_tool/api 未通过 GetDevInfo 校验时，依次尝试的候选端口；
+# HG6142A3 V03.00.M0000 实测 fh_tool API 在 80 端口。
 FALLBACK_FH_TOOL_PORTS = (80,)
 # TCP 探测超时上限（秒），控制候选端口全部不可达时的最坏延迟。
 PORT_PROBE_TCP_TIMEOUT = 2.0

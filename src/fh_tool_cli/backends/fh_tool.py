@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import logging
 from typing import Any, NamedTuple
 
@@ -9,7 +10,7 @@ import requests
 from ..client import tcp_open
 from ..config_store import format_mac, resolve_ip, resolve_mac
 from ..crypto import decrypt_payload, derive_crypto, encrypt_payload
-from ..errors import FHToolError
+from ..errors import FHToolError, FHToolHttpError, FHToolResponseError
 from ..fh_endpoints import (
     DEFAULT_FH_TOOL_PORT,
     FALLBACK_FH_TOOL_PORTS,
@@ -37,6 +38,41 @@ def fh_paths_from_args(args: argparse.Namespace) -> FhPaths:
         upload=getattr(args, "fh_upload_path", None) or FH_TOOL_UPLOAD_PATH,
         download=getattr(args, "fh_download_path", None) or TOOL_DOWNLOAD_PATH,
     )
+
+
+_BASE64_ALPHABET = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+)
+
+_BODY_KIND_LABELS = {
+    "empty": "空响应",
+    "html": "HTML/XML 网页",
+    "json": "明文 JSON",
+    "base64": "无法用当前 MAC 解密的 base64 密文",
+    "text": "非 base64 文本",
+}
+
+
+def classify_response_body(body: str) -> str:
+    """按内容给 200 响应体分类,用于把“解密失败”变成可诊断结论。
+
+    只返回类别,不回显原文:明文 JSON 响应可能包含 adminpwd 等敏感值。
+    """
+    text = "".join(body.split())
+    if not text:
+        return "empty"
+    if text.lstrip().startswith("<"):
+        return "html"
+    if text.startswith(("{", "[")):
+        return "json"
+    if all(ch in _BASE64_ALPHABET for ch in text):
+        try:
+            raw = base64.b64decode(text, validate=True)
+        except Exception:  # noqa: BLE001 - 非法 base64 归入普通文本
+            return "text"
+        if len(raw) % 16 == 0:
+            return "base64"
+    return "text"
 
 
 def fh_tool_call(
@@ -77,13 +113,42 @@ def fh_tool_call(
             func=func,
             status_code=response.status_code,
         )
-        raise FHToolError(f"{path} 返回 HTTP {response.status_code}")
+        raise FHToolHttpError(
+            f"{path} 返回 HTTP {response.status_code}",
+            status_code=response.status_code,
+        )
 
     try:
         result = decrypt_payload(response.text, crypto)
     except Exception as exc:
-        log_event(logging.INFO, "fh_tool.api.decrypt_error", ip=ip, path=path, func=func)
-        raise FHToolError("响应解密失败，MAC 可能不匹配或固件协议不同") from exc
+        body_kind = classify_response_body(response.text)
+        body_length = len(response.text or "")
+        content_type = response.headers.get("Content-Type")
+        log_event(
+            logging.INFO,
+            "fh_tool.api.decrypt_error",
+            ip=ip,
+            port=port,
+            path=path,
+            func=func,
+            status_code=response.status_code,
+            content_type=content_type,
+            body_kind=body_kind,
+            body_length=body_length,
+        )
+        raise FHToolResponseError(
+            "响应解密失败："
+            f"HTTP {response.status_code}，Content-Type={content_type or 'unknown'}，"
+            f"body 长度={body_length}，疑似{_BODY_KIND_LABELS[body_kind]}。"
+            "MAC 不匹配时设备通常返回 HTTP 400，因此这条错误大概率与 MAC 无关；"
+            "更可能是该端口/路径上的服务不是 fh_tool API，或固件协议已变化。"
+            "可运行 fh-tool probe --json 查看各端口/路径状态，"
+            "或用 --fh-port / --fh-api-path 显式指定。",
+            status_code=response.status_code,
+            content_type=content_type,
+            body_kind=body_kind,
+            body_length=body_length,
+        ) from exc
     log_event(
         logging.INFO,
         "fh_tool.api.response",
@@ -103,12 +168,33 @@ def api_payload(func: str, params: dict[str, Any] | None = None, index: str = "1
     return payload
 
 
-def verify_fh_tool_port(ip: str, port: int, mac: str, timeout: float, *, path: str = FH_TOOL_API_PATH) -> bool:
+def check_fh_tool_port(
+    ip: str,
+    port: int,
+    mac: str,
+    timeout: float,
+    *,
+    path: str = FH_TOOL_API_PATH,
+) -> tuple[bool, bool]:
+    """检查端口上的 fh_tool API。
+
+    返回 (是否确认可用, 是否明显不是 fh_tool)。第二个值只在响应表明“这里不是
+    fh_tool”时为 True（200 但响应体不是密文、403/404/405），用于决定是否继续探测
+    候选端口；连接超时、HTTP 400/500 等 API 自身错误不会触发换端口。
+    """
     try:
         result = fh_tool_call(ip, mac, api_payload("GetDevInfo"), timeout, port=port, path=path)
+    except FHToolResponseError:
+        return False, True
+    except FHToolHttpError as exc:
+        return False, exc.status_code in {403, 404, 405}
     except FHToolError:
-        return False
-    return result.get("result") == 0
+        return False, False
+    return result.get("result") == 0, False
+
+
+def verify_fh_tool_port(ip: str, port: int, mac: str, timeout: float, *, path: str = FH_TOOL_API_PATH) -> bool:
+    return check_fh_tool_port(ip, port, mac, timeout, path=path)[0]
 
 
 def _surface_reachable(ip: str, port: int, timeout: float, *, path: str = FH_TOOL_API_PATH) -> bool:
@@ -130,9 +216,11 @@ def resolve_fh_port(
     candidates: tuple[int, ...] = FALLBACK_FH_TOOL_PORTS,
     path: str = FH_TOOL_API_PATH,
 ) -> tuple[int, str]:
-    """解析 fh_tool 后端端口：显式 --fh-port > 8080 TCP 快筛 > 候选端口探测 > 回退默认。
+    """解析 fh_tool 后端端口：显式 --fh-port > 8080 实测校验 > 候选端口探测 > 回退默认。
 
-    仅当 8080 TCP 不可达时才触发候选端口探测；HTTP 4xx/5xx、解密失败不触发切换。
+    8080 TCP 可达时不再直接采信，而是用 GetDevInfo 确认它确实是 fh_tool API；
+    如果 8080 返回 200 但响应体不是密文（典型：8080 是 Web UI、API 在 80），
+    继续探测候选端口。连接超时、HTTP 400/500 等 API 自身错误仍保留 8080。
     """
     explicit = getattr(args, "fh_port", None)
     if explicit is not None:
@@ -141,8 +229,22 @@ def resolve_fh_port(
 
     tcp_timeout = min(timeout, PORT_PROBE_TCP_TIMEOUT)
     if tcp_open(ip, DEFAULT_FH_TOOL_PORT, tcp_timeout):
-        log_event(logging.DEBUG, "fh_tool.port.default_ok", ip=ip, port=DEFAULT_FH_TOOL_PORT)
-        return DEFAULT_FH_TOOL_PORT, "default"
+        if mac is None:
+            log_event(logging.DEBUG, "fh_tool.port.default_ok", ip=ip, port=DEFAULT_FH_TOOL_PORT)
+            return DEFAULT_FH_TOOL_PORT, "default"
+        verified, try_elsewhere = check_fh_tool_port(
+            ip, DEFAULT_FH_TOOL_PORT, mac, timeout, path=path
+        )
+        if verified or not try_elsewhere:
+            log_event(logging.DEBUG, "fh_tool.port.default_ok", ip=ip, port=DEFAULT_FH_TOOL_PORT)
+            return DEFAULT_FH_TOOL_PORT, "default"
+        log_event(
+            logging.INFO,
+            "fh_tool.port.default_wrong_service",
+            ip=ip,
+            port=DEFAULT_FH_TOOL_PORT,
+            default_port=DEFAULT_FH_TOOL_PORT,
+        )
 
     tried: list[int] = []
     for port in candidates:
@@ -151,12 +253,15 @@ def resolve_fh_port(
         tried.append(port)
         if not tcp_open(ip, port, tcp_timeout):
             continue
-        verified_by = "surface"
         if mac:
-            if verify_fh_tool_port(ip, port, mac, timeout, path=path):
-                verified_by = "getdevinfo"
-            elif not _surface_reachable(ip, port, timeout, path=path):
+            verified, _ = check_fh_tool_port(ip, port, mac, timeout, path=path)
+            if not verified:
                 continue
+            verified_by = "getdevinfo"
+        else:
+            if not _surface_reachable(ip, port, timeout, path=path):
+                continue
+            verified_by = "surface"
         log_event(
             logging.INFO,
             "fh_tool.port.fallback_selected",
@@ -177,12 +282,13 @@ def resolve_fh_port(
     return DEFAULT_FH_TOOL_PORT, "default_unverified"
 
 
-def _unverified_port_hint(exc: FHToolError) -> FHToolError:
+def _unverified_port_hint(exc: FHToolError, *, path: str = FH_TOOL_API_PATH) -> FHToolError:
     candidates = ", ".join(str(port) for port in FALLBACK_FH_TOOL_PORTS)
     return FHToolError(
         f"{exc}\n"
-        f"（提示：已自动探测候选端口 {candidates}，未发现 fh_tool 服务。"
-        "可运行 fh-tool probe 查看各端口/路径状态，或用 --fh-port 显式指定端口；"
+        f"（提示：已实测 8080 与候选端口 {candidates} 的 {path}，均未通过 GetDevInfo 校验。"
+        "可运行 fh-tool probe 查看各端口/路径状态，或用 --fh-port 显式指定端口、"
+        "用 --mac 确认网关 MAC；"
         "部分型号/固件（如 HG6142A3 V03.00.M0000）的 fh_tool API 在 80 端口）"
     )
 
@@ -240,7 +346,7 @@ def call_method(args: argparse.Namespace, func: str, params: dict[str, Any] | No
         response = fh_tool_call(ip, mac, api_payload(func, params), args.timeout, port=port, path=paths.api)
     except FHToolError as exc:
         if port_source == "default_unverified":
-            raise _unverified_port_hint(exc) from exc
+            raise _unverified_port_hint(exc, path=paths.api) from exc
         raise
     return {
         "ip": ip,

@@ -151,8 +151,10 @@ fh-tool ports --ports 23,80,443,8080
 工具默认行为：
 
 1. 先尝试默认端口 `8080`；
-2. 仅当 `8080` TCP 不可达时，自动探测候选端口（当前为 `80`，用 `GetDevInfo` / HTTP surface 验证），并在结果 JSON 的 `fh_port`/`fh_port_source` 字段中说明最终使用的端口和来源（`argument`/`default`/`auto_detected`/`default_unverified`）；
-3. 探测失败时沿用 `8080` 并在错误信息中给出引导。
+2. `8080` TCP 可达时用 `GetDevInfo` 实测校验它确实是 fh_tool API；如果返回 200 但响应体不是密文（典型：8080 是 Web UI、API 在 80），或返回 403/404/405，则继续探测候选端口（当前为 `80`，用 `GetDevInfo` 验证）；
+3. 连接超时、HTTP 400/500 等 API 自身错误不会触发换端口；
+4. 探测失败时沿用 `8080` 并在错误信息中给出引导；
+5. 结果 JSON 的 `fh_port`/`fh_port_source` 字段说明最终使用的端口和来源（`argument`/`default`/`auto_detected`/`default_unverified`）。
 
 也可以显式指定端口（跳过探测）：
 
@@ -181,9 +183,9 @@ Web 侧端点同样可覆盖：Web AJAX 路径用 `--ajax-path`（默认 `/cgi-b
 
 已知局限：
 
-- 如果 `8080` 与 `80` 同时 TCP 开放、但 fh_tool API 只在 `80`，TCP 快筛会停留在 `8080` 并以 HTTP/解密错误失败，此时需要 `--fh-port 80` 显式指定；`fh-tool probe --json` 的 `fh_ports` 字段可以诊断这种场景。
+- 有 MAC 时，候选端口必须通过 `GetDevInfo` 校验才会被选中，不再用“任意 HTTP 响应”兜底，避免误选到同一端口上的 Web UI；代价是每个命令会多一次只读 `GetDevInfo` 请求。
 - 设备返回的绝对下载 URL（含端口和路径）按原样使用，不会重写端口或路径。
-- `HTTP 4xx/5xx`、解密失败不会触发端口切换——那说明 8080 上有 HTTP 服务，问题在路径/协议/MAC 而非端口。
+- 响应解密失败时，错误信息会给出 HTTP 状态、`Content-Type`、body 长度和 body 分类（HTML / 明文 JSON / 空响应 / base64 密文等），不会回显 body 原文（可能含密码）。
 
 ## Telnet 自动登录兼容性
 

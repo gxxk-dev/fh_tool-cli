@@ -182,8 +182,8 @@ def _web_password_from_admin_account(args: argparse.Namespace) -> str:
     ip, _ip_source = resolve_ip(args)
     mac, _mac_source = resolve_mac(args, ip, required=True, allow_prompt=True)
     assert mac is not None
-    fh_port, _fh_port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout)
     fh_api_path = getattr(args, "fh_api_path", None) or FH_TOOL_API_PATH
+    fh_port, _fh_port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout, path=fh_api_path)
     result = fh_tool_call(ip, mac, api_payload("GetAdminAccount"), args.timeout, port=fh_port, path=fh_api_path)
     password = _extract_password_from_mapping(result)
     if not password:
