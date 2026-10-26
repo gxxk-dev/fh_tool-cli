@@ -37,7 +37,7 @@ fh-tool --log-file fh-tool.log dev-info
 
 `--json` 输出稳定的 machine-readable JSON，不混入日志或样式。当前默认人类输出仍保持 pretty JSON，以兼容已有脚本；后续可以在不影响 `--json` 的前提下逐步增加表格化输出。
 
-`--log-file` 写入 JSON lines 结构化日志；`-v/-vv` 控制 info/debug 事件，`-q` 只保留 error 级别。`-v` 会记录每次 fh_tool 请求的端口/路径/耗时，以及 HTTP 错误和“响应解密失败”时的响应体预览（HTML 原文截断、明文 JSON 递归脱敏、可疑文本隐藏）；`-vv` 额外输出解密后的完整响应。密码、session、token、LOID、PPPoE 等字段始终脱敏。
+`--log-file` 写入 JSON lines 结构化日志；`-v/-vv` 控制 info/debug 事件，`-q` 只保留 error 级别。`-v` 会记录每次 fh_tool 请求的端口/路径/耗时，以及 HTTP 错误和“响应解密失败”时的响应体预览（HTML 原文截断、明文 JSON 递归脱敏、可疑文本隐藏）。加 `--diagnose` 后，日志和 `probe` 输出还会带上安全的响应头子集（`Server`、`Status`、`Transfer-Encoding`、`ETag` 等）与响应头名字列表，便于判断端口上是 nginx、uhttpd 还是其它服务；默认不输出这些指纹。会话类响应头（`Set-Cookie`、`Authorization` 等）永不写入日志。`-vv` 额外输出解密后的完整响应。密码、session、token、LOID、PPPoE 等字段始终脱敏。
 
 ## 快速配置
 
@@ -83,13 +83,24 @@ fh-tool dev-info --ip 192.168.1.1 --mac AABBCCDDEEFF
 
 ## 常用命令
 
-低风险 probe（输出 `fh_port`/`fh_port_source` 与各候选端口 `fh_ports` 明细，可用于诊断 fh_tool API 所在端口）：
+低风险 probe（输出 `fh_port`/`fh_port_source` 与各候选端口 `fh_ports` 明细，可用于诊断 fh_tool API 所在端口；默认输出保持精简，加 `--diagnose` 才额外输出 `root`、`server`、`Content-Type`、`header_names` 等安全响应头指纹，用来区分 nginx、uhttpd 和自研服务）：
 
 ```bash
 fh-tool probe
 fh-tool probe --json
 fh-tool probe --fh-port 80
+fh-tool probe --json --diagnose
 ```
+
+如果不知道 fh_tool API 在哪个端口/路径，可以用只读的 `scan` 扫描本机网关的常见端口和候选 RPC 路径：
+
+```bash
+fh-tool scan --json
+fh-tool scan --json --mac AABBCCDDEEFF
+fh-tool scan --ports 80,443,8000-8100 --paths /fh_tool/api,/cgi-bin/tool_api --json
+```
+
+`scan` 只允许扫描私有/环回/链路本地/CGNAT 地址；单次最多 4096 个 port、16 个 path，默认找到第一个通过 `GetDevInfo` 校验的端点后就提前停止。没有 MAC 时只记录端口/HTTP 表面状态，不会猜测端点可用。也可以手动用 nmap 找开放端口，再用 `fh-tool probe --fh-port <PORT> --diagnose --json` 逐个确认。
 
 读取设备信息：
 
@@ -189,7 +200,7 @@ Web 侧端点同样可覆盖：Web AJAX 路径用 `--ajax-path`（默认 `/cgi-b
 
 - 有 MAC 时，候选端口必须通过 `GetDevInfo` 校验才会被选中，不再用“任意 HTTP 响应”兜底，避免误选到同一端口上的 Web UI；代价是每个命令会多一次只读 `GetDevInfo` 请求。
 - 设备返回的绝对下载 URL（含端口和路径）按原样使用，不会重写端口或路径。
-- 响应解密失败时，错误信息会给出 HTTP 状态、`Content-Type`、body 长度和 body 分类（HTML / 明文 JSON / 空响应 / base64 密文等），不会回显 body 原文（可能含密码）。
+- 响应解密失败时，错误信息会给出 HTTP 状态、`Content-Type`、body 长度和 body 分类（HTML / 明文 JSON / 空响应 / base64 密文等），不会回显 body 原文（可能含密码）。加 `--diagnose` 后会额外给出 `Server`、安全响应头与响应头名字列表，便于判断端口上实际是什么服务；若 `Server` 为空且 body 长度为 0，还应排查本机代理/防火墙是否拦截了局域网 IP。
 
 ## Telnet 自动登录兼容性
 

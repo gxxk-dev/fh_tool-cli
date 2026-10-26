@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .argparse_utils import normalize_path, normalize_port
+from .argparse_utils import normalize_path, normalize_port, parse_paths, parse_port_spec
 from .backends.local_vm import DEFAULT_VM_ROOT
 from .backup import DEFAULT_DEVICE_RESTORE_CHUNK_SIZE, DEFAULT_DEVICE_RESTORE_TMPDIR
 from .commands.web import register_web_commands
@@ -16,6 +16,10 @@ from .fh_endpoints import FH_TOOL_API_PATH, FH_TOOL_UPLOAD_PATH, TOOL_DOWNLOAD_P
 from .upload import UPLOAD_ACTIONS
 
 DEFAULT_PORTS = "23,80,443,8080"
+# scan 默认端口：FiberHome 常见的 Web/API 端口，外加固件里 nginx/thttpd 的监听端口。
+DEFAULT_SCAN_PORTS = "80,443,8000,8008,8080,8081,8088,8443,8840,49157"
+# scan 默认只尝试已知的 fh_tool RPC 路径；`/cgi-bin/tool_api` 是 thttpd 直连路径。
+DEFAULT_SCAN_PATHS = f"{FH_TOOL_API_PATH},/cgi-bin/tool_api"
 
 HandlerMap = Mapping[str, Any]
 
@@ -24,7 +28,12 @@ def _handler(handlers: HandlerMap, name: str) -> Any:
     return handlers[name]
 
 
-def add_common_options(parser: argparse.ArgumentParser) -> None:
+def add_target_options(
+    parser: argparse.ArgumentParser,
+    *,
+    include_diagnose: bool = True,
+) -> None:
+    """目标设备相关参数；scan 等不解析 fh_port 的命令也复用这一组。"""
     parser.add_argument("--ip", type=normalize_ip, help="网关 IPv4 地址")
     parser.add_argument(
         "--mac",
@@ -36,6 +45,27 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
         default=5.0,
         help="HTTP/TCP timeout 秒数，默认 5",
     )
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG_PATH),
+        help=f"配置文件路径，默认 {DEFAULT_CONFIG_PATH}",
+    )
+    parser.add_argument(
+        "--ask-mac",
+        action="store_true",
+        help="无法自动获取 MAC 时交互式询问；--json 下不会询问",
+    )
+    if include_diagnose:
+        parser.add_argument(
+            "--diagnose",
+            action="store_true",
+            help="输出端口指纹与安全响应头等诊断信息（只读；默认关闭）",
+        )
+    parser.add_argument("--json", action="store_true", help="输出 machine-readable JSON")
+
+
+def add_common_options(parser: argparse.ArgumentParser) -> None:
+    add_target_options(parser)
     parser.add_argument(
         "--fh-port",
         type=normalize_port,
@@ -60,17 +90,6 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=f"fh_tool 下载路径，默认 {TOOL_DOWNLOAD_PATH}；仅影响 probe surface 检查，实际下载以设备返回 URL 为准",
     )
-    parser.add_argument(
-        "--config",
-        default=str(DEFAULT_CONFIG_PATH),
-        help=f"配置文件路径，默认 {DEFAULT_CONFIG_PATH}",
-    )
-    parser.add_argument(
-        "--ask-mac",
-        action="store_true",
-        help="无法自动获取 MAC 时交互式询问；--json 下不会询问",
-    )
-    parser.add_argument("--json", action="store_true", help="输出 machine-readable JSON")
 
 
 def add_confirm(parser: argparse.ArgumentParser) -> None:
@@ -213,6 +232,42 @@ def build_parser(handlers: HandlerMap) -> argparse.ArgumentParser:
     add_common_options(probe)
     probe.add_argument("--ports", default=DEFAULT_PORTS, help=f"逗号分隔 port，默认 {DEFAULT_PORTS}")
     probe.set_defaults(handler=_handler(handlers, "command_probe"))
+
+    scan = subparsers.add_parser(
+        "scan",
+        help="只读扫描本机网关上的 fh_tool API 端口/路径位置",
+        description=(
+            "只读扫描本机网关上的 fh_tool API 位置。默认只尝试已知 RPC 路径，"
+            "并限制单次最多 4096 个 port；找到第一个 GetDevInfo 可用的端点后提前结束。"
+            "仅允许扫描私有/环回/链路本地地址。"
+        ),
+    )
+    add_target_options(scan, include_diagnose=False)
+    scan.add_argument(
+        "--ports",
+        type=parse_port_spec,
+        default=DEFAULT_SCAN_PORTS,
+        help=f"逗号分隔的 port 或范围（如 80,8080 或 1-1024），默认 {DEFAULT_SCAN_PORTS}",
+    )
+    scan.add_argument(
+        "--paths",
+        type=parse_paths,
+        default=DEFAULT_SCAN_PATHS,
+        help=f"逗号分隔的候选 API path，默认 {DEFAULT_SCAN_PATHS}",
+    )
+    scan.add_argument(
+        "--connect-timeout",
+        type=float,
+        default=0.4,
+        help="TCP 端口探测 timeout 秒数，默认 0.4",
+    )
+    scan.add_argument(
+        "--workers",
+        type=int,
+        default=32,
+        help="并发扫描 port 的线程数（1-64），默认 32",
+    )
+    scan.set_defaults(handler=_handler(handlers, "command_scan"))
 
     adapt_prompt = subparsers.add_parser(
         "adapt-prompt",

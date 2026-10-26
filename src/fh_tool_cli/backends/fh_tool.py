@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Mapping
 from typing import Any, NamedTuple
 
 import requests
@@ -54,6 +55,60 @@ _BODY_KIND_LABELS = {
     "base64": "无法用当前 MAC 解密的 base64 密文",
     "text": "非 base64 文本",
 }
+
+# 只记录能标识服务且不含凭据/会话的响应头。
+# 绝不记录 Set-Cookie、Authorization、WWW-Authenticate 等,避免把 session 写进日志。
+# FiberHome 的 nginx/uhttpd 会隐藏 Server 头,因此保留 ETag/Keep-Alive/Status 等
+# 指纹字段,用于区分 nginx、uhttpd 和自研服务。
+_SAFE_RESPONSE_HEADERS = (
+    "Server",
+    "Content-Type",
+    "Content-Length",
+    "Content-Encoding",
+    "Connection",
+    "Location",
+    "X-Powered-By",
+    "Status",
+    "Transfer-Encoding",
+    "Date",
+    "Keep-Alive",
+    "ETag",
+    "Last-Modified",
+    "Accept-Ranges",
+    "Cache-Control",
+    "Expires",
+    "Pragma",
+    "X-Frame-Options",
+    "X-XSS-Protection",
+    "X-Download-Options",
+    "X-Permitted-Cross-Domain-Policies",
+    "Referrer-Policy",
+)
+
+
+def _sanitize_location(value: str) -> str:
+    """只保留 Location 的 path,去掉可能夹带 token/session 的 query 与 fragment。"""
+    return value.split("?", 1)[0].split("#", 1)[0]
+
+
+def response_header_summary(headers: Mapping[str, str]) -> dict[str, str]:
+    """提取可安全写入日志/JSON 的响应头子集。
+
+    `requests` 的 headers 本身大小写不敏感,但测试或其它调用方可能传普通 dict,
+    这里统一按小写匹配,避免因大小写漏掉 `Server` 等关键诊断信息。
+    """
+    lowered = {str(name).lower(): value for name, value in headers.items()}
+    summary: dict[str, str] = {}
+    for name in _SAFE_RESPONSE_HEADERS:
+        value = lowered.get(name.lower())
+        if value is not None:
+            summary[name] = _sanitize_location(value) if name == "Location" else value
+    return summary
+
+
+def response_header_names(headers: Mapping[str, str]) -> list[str]:
+    """返回响应头名字列表(不含值),用于识别服务栈且不泄露会话内容。"""
+    return sorted({str(name).lower() for name in headers})
 
 
 def classify_response_body(body: str) -> str:
@@ -119,6 +174,7 @@ def fh_tool_call(
     *,
     port: int = DEFAULT_FH_TOOL_PORT,
     path: str = FH_TOOL_API_PATH,
+    diagnose: bool = False,
 ) -> dict[str, Any]:
     crypto = derive_crypto(mac)
     encrypted = encrypt_payload(payload, crypto)
@@ -161,6 +217,14 @@ def fh_tool_call(
 
     if response.status_code != 200:
         body_kind = classify_response_body(response.text)
+        diagnostics: dict[str, Any] = {}
+        if diagnose:
+            headers = response_header_summary(response.headers)
+            diagnostics = {
+                "server": headers.get("Server"),
+                "response_headers": headers,
+                "header_names": response_header_names(response.headers),
+            }
         log_event(
             logging.INFO,
             "fh_tool.api.http_error",
@@ -174,6 +238,7 @@ def fh_tool_call(
             body_length=len(response.text or ""),
             body_preview=response_body_preview(response.text or "", body_kind),
             elapsed_ms=elapsed_ms,
+            **diagnostics,
         )
         raise FHToolHttpError(
             f"{path} 返回 HTTP {response.status_code}",
@@ -186,6 +251,17 @@ def fh_tool_call(
         body_kind = classify_response_body(response.text)
         body_length = len(response.text or "")
         content_type = response.headers.get("Content-Type")
+        headers: dict[str, str] = {}
+        server: str | None = None
+        diagnostics: dict[str, Any] = {}
+        if diagnose:
+            headers = response_header_summary(response.headers)
+            server = headers.get("Server")
+            diagnostics = {
+                "server": server,
+                "response_headers": headers,
+                "header_names": response_header_names(response.headers),
+            }
         log_event(
             logging.INFO,
             "fh_tool.api.decrypt_error",
@@ -199,19 +275,33 @@ def fh_tool_call(
             body_length=body_length,
             body_preview=response_body_preview(response.text or "", body_kind),
             elapsed_ms=elapsed_ms,
+            **diagnostics,
         )
+        server_text = f"Server={server or 'none'}，" if diagnose else ""
+        proxy_hint = (
+            "如果 Server 为空且 body 长度为 0，请同时检查本机代理/防火墙是否拦截了局域网 IP。"
+            if diagnose
+            else ""
+        )
+        diagnose_hint = "" if diagnose else "加 --diagnose 可输出 Server/响应头指纹，"
         raise FHToolResponseError(
             "响应解密失败："
-            f"HTTP {response.status_code}，Content-Type={content_type or 'unknown'}，"
+            f"HTTP {response.status_code}，{server_text}"
+            f"Content-Type={content_type or 'unknown'}，"
             f"body 长度={body_length}，疑似{_BODY_KIND_LABELS[body_kind]}。"
             "MAC 不匹配时设备通常返回 HTTP 400，因此这条错误大概率与 MAC 无关；"
             "更可能是该端口/路径上的服务不是 fh_tool API，或固件协议已变化。"
+            f"{proxy_hint}"
             "可运行 fh-tool probe --json 查看各端口/路径状态，"
+            f"{diagnose_hint}"
             "或用 --fh-port / --fh-api-path 显式指定。",
             status_code=response.status_code,
             content_type=content_type,
             body_kind=body_kind,
             body_length=body_length,
+            server=server,
+            header_names=response_header_names(response.headers) if diagnose else [],
+            response_headers=headers,
         ) from exc
     log_event(
         logging.INFO,
@@ -275,6 +365,47 @@ def _surface_reachable(ip: str, port: int, timeout: float, *, path: str = FH_TOO
         return False
     log_event(logging.DEBUG, "fh_tool.port.surface", ip=ip, port=port, status_code=response.status_code)
     return True
+
+
+def http_get_surface(
+    ip: str,
+    port: int,
+    path: str,
+    timeout: float,
+    *,
+    diagnose: bool = False,
+) -> dict[str, Any]:
+    """GET 一个路径,只采集状态码与安全响应头,不读取 body。
+
+    probe 用它判断端口上是 fh_tool、Web UI 还是其它服务。`stream=True` 避免把
+    整个管理页面下载到内存;不记录 Set-Cookie 等会话信息。默认只返回
+    status_code/content_type,`diagnose=True` 时才附带服务指纹。
+    """
+    url = fh_tool_url(ip, port, path)
+    try:
+        response = requests.get(url, timeout=timeout, allow_redirects=False, stream=True)
+    except requests.RequestException as exc:
+        return {"error": str(exc)}
+    try:
+        headers = response_header_summary(response.headers)
+        surface: dict[str, Any] = {
+            "status_code": response.status_code,
+            "content_type": headers.get("Content-Type"),
+        }
+        if diagnose:
+            surface.update(
+                {
+                    "server": headers.get("Server"),
+                    "location": headers.get("Location"),
+                    "content_length": headers.get("Content-Length"),
+                    "header_names": response_header_names(response.headers),
+                }
+            )
+        return surface
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
 
 
 def resolve_fh_port(
@@ -369,8 +500,14 @@ def probe_fh_port_candidates(
     timeout: float,
     ports: tuple[int, ...] | None = None,
     paths: FhPaths | None = None,
+    *,
+    diagnose: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """对候选端口逐个报告 tcp/surface/getdevinfo 状态，供 probe 命令诊断端点。"""
+    """对候选端口逐个报告 tcp/surface/getdevinfo 状态，供 probe 命令诊断端点。
+
+    默认输出保持精简；`diagnose=True` 时额外报告 GET / 的服务指纹和
+    GetDevInfo 失败时的响应头分类。
+    """
     if ports is None:
         ports = tuple(dict.fromkeys([DEFAULT_FH_TOOL_PORT, *FALLBACK_FH_TOOL_PORTS]))
     if paths is None:
@@ -383,23 +520,45 @@ def probe_fh_port_candidates(
             "surface": {},
             "getdevinfo": None,
         }
+        if diagnose:
+            # GET / 用于确认端口上是 Web 管理页还是其它服务（看 Server/Content-Type/Location）。
+            entry["root"] = http_get_surface(ip, port, "/", timeout, diagnose=True)
         for path in (paths.api, paths.upload, paths.download):
-            url = fh_tool_url(ip, port, path)
-            try:
-                response = requests.get(url, timeout=timeout, allow_redirects=False)
-                entry["surface"][path] = {
-                    "status_code": response.status_code,
-                    "content_type": response.headers.get("Content-Type"),
-                }
-            except requests.RequestException as exc:
-                entry["surface"][path] = {"error": str(exc)}
+            entry["surface"][path] = http_get_surface(ip, port, path, timeout, diagnose=diagnose)
         if mac and entry["tcp"]:
             try:
-                dev_info = fh_tool_call(ip, mac, api_payload("GetDevInfo"), timeout, port=port, path=paths.api)
+                dev_info = fh_tool_call(
+                    ip,
+                    mac,
+                    api_payload("GetDevInfo"),
+                    timeout,
+                    port=port,
+                    path=paths.api,
+                    diagnose=diagnose,
+                )
                 entry["getdevinfo"] = {
                     "ok": dev_info.get("result") == 0,
                     "response": dev_info,
                 }
+            except FHToolResponseError as exc:
+                entry["getdevinfo"] = {"ok": False, "error": str(exc)}
+                if diagnose:
+                    # 把“200 但不是密文”的诊断信息直接放进 probe JSON，不必再翻日志。
+                    entry["getdevinfo"].update(
+                        {
+                            "status_code": exc.status_code,
+                            "content_type": exc.content_type,
+                            "server": exc.server,
+                            "body_kind": exc.body_kind,
+                            "body_length": exc.body_length,
+                            "header_names": exc.header_names,
+                            "response_headers": exc.response_headers,
+                        }
+                    )
+            except FHToolHttpError as exc:
+                entry["getdevinfo"] = {"ok": False, "error": str(exc)}
+                if diagnose:
+                    entry["getdevinfo"]["status_code"] = exc.status_code
             except FHToolError as exc:
                 entry["getdevinfo"] = {"ok": False, "error": str(exc)}
         report[str(port)] = entry
@@ -413,7 +572,15 @@ def call_method(args: argparse.Namespace, func: str, params: dict[str, Any] | No
     paths = fh_paths_from_args(args)
     port, port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout, path=paths.api)
     try:
-        response = fh_tool_call(ip, mac, api_payload(func, params), args.timeout, port=port, path=paths.api)
+        response = fh_tool_call(
+            ip,
+            mac,
+            api_payload(func, params),
+            args.timeout,
+            port=port,
+            path=paths.api,
+            diagnose=bool(getattr(args, "diagnose", False)),
+        )
     except FHToolError as exc:
         if port_source == "default_unverified":
             raise _unverified_port_hint(exc, path=paths.api) from exc

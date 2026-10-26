@@ -32,9 +32,17 @@ class FHToolResponseError(FHToolError):
         content_type: str | None,
         body_kind: str,
         body_length: int,
+        server: str | None = None,
+        header_names: list[str] | None = None,
+        response_headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.content_type = content_type
         self.body_kind = body_kind
         self.body_length = body_length
+        # Server 响应用于判断该端口上到底是什么服务（nginx/thttpd/自研服务）。
+        self.server = server
+        # 只包含安全白名单响应头/头名，具体过滤规则见 backends.fh_tool。
+        self.header_names = header_names or []
+        self.response_headers = response_headers or {}

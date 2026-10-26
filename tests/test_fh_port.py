@@ -17,9 +17,11 @@ from fh_tool_cli.backends.fh_tool import (
     check_fh_tool_port,
     classify_response_body,
     fh_tool_call,
+    http_get_surface,
     probe_fh_port_candidates,
     resolve_fh_port,
     response_body_preview,
+    response_header_summary,
 )
 from fh_tool_cli.client import make_download_url
 from fh_tool_cli.crypto import derive_crypto, encrypt_payload
@@ -251,6 +253,80 @@ class CheckFhToolPortTests(unittest.TestCase):
             self.assertEqual(check_fh_tool_port(TEST_IP, 8080, TEST_MAC, 1.0), (False, False))
 
 
+class ResponseHeaderSummaryTests(unittest.TestCase):
+    def test_keeps_only_safe_headers(self) -> None:
+        summary = response_header_summary(
+            {
+                "Server": "nginx",
+                "Content-Type": "text/html",
+                "Location": "/login",
+                "Set-Cookie": "sessionid=secret",
+                "Authorization": "Bearer secret",
+            }
+        )
+        self.assertEqual(
+            summary,
+            {
+                "Server": "nginx",
+                "Content-Type": "text/html",
+                "Location": "/login",
+            },
+        )
+
+    def test_matches_header_names_case_insensitively(self) -> None:
+        self.assertEqual(response_header_summary({"server": "thttpd"}), {"Server": "thttpd"})
+
+    def test_location_query_and_fragment_are_stripped(self) -> None:
+        summary = response_header_summary(
+            {"Location": "https://192.168.1.1/login?token=secret#section"}
+        )
+        self.assertEqual(summary["Location"], "https://192.168.1.1/login")
+
+
+class HttpGetSurfaceTests(unittest.TestCase):
+    def test_connection_error_is_reported_without_raising(self) -> None:
+        with patch(
+            "fh_tool_cli.backends.fh_tool.requests.get",
+            side_effect=requests.ConnectionError("refused"),
+        ):
+            self.assertEqual(
+                http_get_surface(TEST_IP, 8080, "/fh_tool/api", 1.0),
+                {"error": "refused"},
+            )
+
+    def test_default_surface_keeps_legacy_fields(self) -> None:
+        response = _FakeResponse(
+            200,
+            headers={
+                "Content-Type": "text/html",
+                "Content-Length": "123",
+                "Server": "nginx",
+                "Set-Cookie": "sid=secret",
+            },
+        )
+        with patch("fh_tool_cli.backends.fh_tool.requests.get", return_value=response):
+            surface = http_get_surface(TEST_IP, 8080, "/", 1.0)
+        self.assertEqual(surface, {"status_code": 200, "content_type": "text/html"})
+
+    def test_returns_header_fingerprint_without_body(self) -> None:
+        response = _FakeResponse(
+            200,
+            headers={
+                "Content-Type": "text/html",
+                "Content-Length": "123",
+                "Set-Cookie": "sid=secret",
+            },
+        )
+        with patch("fh_tool_cli.backends.fh_tool.requests.get", return_value=response) as get_mock:
+            surface = http_get_surface(TEST_IP, 8080, "/", 1.0, diagnose=True)
+        self.assertEqual(surface["status_code"], 200)
+        self.assertEqual(surface["content_type"], "text/html")
+        self.assertEqual(surface["content_length"], "123")
+        self.assertEqual(surface["header_names"], ["content-length", "content-type", "set-cookie"])
+        self.assertNotIn("Set-Cookie", surface)
+        self.assertTrue(get_mock.call_args.kwargs["stream"])
+
+
 class ClassifyResponseBodyTests(unittest.TestCase):
     def test_empty_body(self) -> None:
         self.assertEqual(classify_response_body("  \r\n"), "empty")
@@ -308,7 +384,31 @@ class FhToolLogTests(unittest.TestCase):
         response = _FakeResponse(
             status_code=200,
             text="<html><title>login</title></html>",
-            headers={"Content-Type": "text/html"},
+            headers={"Content-Type": "text/html", "Server": "nginx", "Set-Cookie": "sid=secret"},
+        )
+        with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=response):
+            with self.assertLogs("fh_tool_cli", level="INFO") as captured:
+                with self.assertRaises(FHToolResponseError):
+                    fh_tool_call(TEST_IP, TEST_MAC, api_payload("GetDevInfo"), 1.0, diagnose=True)
+        decrypt_events = [
+            self._fields(item)
+            for item in self._records(captured)
+            if getattr(item, "event", None) == "fh_tool.api.decrypt_error"
+        ]
+        self.assertEqual(len(decrypt_events), 1)
+        self.assertEqual(decrypt_events[0]["body_kind"], "html")
+        self.assertIn("login", decrypt_events[0]["body_preview"])
+        self.assertIn("elapsed_ms", decrypt_events[0])
+        self.assertEqual(decrypt_events[0]["server"], "nginx")
+        self.assertEqual(decrypt_events[0]["response_headers"]["Server"], "nginx")
+        self.assertNotIn("Set-Cookie", decrypt_events[0]["response_headers"])
+        self.assertIn("set-cookie", decrypt_events[0]["header_names"])
+
+    def test_decrypt_error_default_log_omits_header_fingerprint(self) -> None:
+        response = _FakeResponse(
+            status_code=200,
+            text="<html><title>login</title></html>",
+            headers={"Content-Type": "text/html", "Server": "nginx"},
         )
         with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=response):
             with self.assertLogs("fh_tool_cli", level="INFO") as captured:
@@ -320,9 +420,9 @@ class FhToolLogTests(unittest.TestCase):
             if getattr(item, "event", None) == "fh_tool.api.decrypt_error"
         ]
         self.assertEqual(len(decrypt_events), 1)
-        self.assertEqual(decrypt_events[0]["body_kind"], "html")
-        self.assertIn("login", decrypt_events[0]["body_preview"])
-        self.assertIn("elapsed_ms", decrypt_events[0])
+        self.assertNotIn("server", decrypt_events[0])
+        self.assertNotIn("response_headers", decrypt_events[0])
+        self.assertNotIn("header_names", decrypt_events[0])
 
     def test_debug_result_log_redacts_password(self) -> None:
         crypto = derive_crypto(TEST_MAC)
@@ -353,25 +453,45 @@ class FhToolErrorDetailTests(unittest.TestCase):
         response = _FakeResponse(
             status_code=200,
             text="<html><body>web ui</body></html>",
-            headers={"Content-Type": "text/html"},
+            headers={"Content-Type": "text/html", "Server": "nginx/1.14.0"},
+        )
+        with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=response):
+            with self.assertRaises(FHToolResponseError) as ctx:
+                fh_tool_call(TEST_IP, TEST_MAC, api_payload("GetDevInfo"), 1.0, diagnose=True)
+        error = ctx.exception
+        self.assertEqual(error.body_kind, "html")
+        self.assertEqual(error.content_type, "text/html")
+        self.assertEqual(error.server, "nginx/1.14.0")
+        self.assertIn("Server=nginx/1.14.0", str(error))
+        self.assertIn("HTML", str(error))
+        self.assertIn("fh_tool API", str(error))
+        self.assertIn("HTTP 400", str(error))
+
+    def test_decrypt_error_default_hides_server(self) -> None:
+        response = _FakeResponse(
+            status_code=200,
+            text="<html><body>web ui</body></html>",
+            headers={"Content-Type": "text/html", "Server": "nginx/1.14.0"},
         )
         with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=response):
             with self.assertRaises(FHToolResponseError) as ctx:
                 fh_tool_call(TEST_IP, TEST_MAC, api_payload("GetDevInfo"), 1.0)
         error = ctx.exception
         self.assertEqual(error.body_kind, "html")
-        self.assertEqual(error.content_type, "text/html")
-        self.assertIn("HTML", str(error))
-        self.assertIn("fh_tool API", str(error))
-        self.assertIn("HTTP 400", str(error))
+        self.assertIsNone(error.server)
+        self.assertNotIn("Server=", str(error))
+        self.assertIn("--diagnose", str(error))
 
     def test_decrypt_error_classifies_empty_body(self) -> None:
         response = _FakeResponse(status_code=200, text="")
         with patch("fh_tool_cli.backends.fh_tool.requests.post", return_value=response):
             with self.assertRaises(FHToolResponseError) as ctx:
-                fh_tool_call(TEST_IP, TEST_MAC, api_payload("GetAdminAccount"), 1.0)
+                fh_tool_call(TEST_IP, TEST_MAC, api_payload("GetAdminAccount"), 1.0, diagnose=True)
         self.assertEqual(ctx.exception.body_kind, "empty")
+        self.assertIsNone(ctx.exception.server)
+        self.assertIn("Server=none", str(ctx.exception))
         self.assertIn("疑似空响应", str(ctx.exception))
+        self.assertEqual(ctx.exception.header_names, [])
 
 
 class CallMethodTests(unittest.TestCase):
@@ -383,6 +503,14 @@ class CallMethodTests(unittest.TestCase):
             result = call_method(_args(), "GetDevInfo")
         self.assertEqual(result["fh_port"], 8080)
         self.assertEqual(result["fh_port_source"], "default")
+
+    def test_call_method_forwards_diagnose(self) -> None:
+        args = _args(diagnose=True, fh_port=80)
+        with (
+            patch("fh_tool_cli.backends.fh_tool.fh_tool_call", return_value={"result": 0}) as call_mock,
+        ):
+            call_method(args, "GetDevInfo")
+        self.assertTrue(call_mock.call_args.kwargs["diagnose"])
 
     def test_result_uses_explicit_port_end_to_end(self) -> None:
         with (
@@ -432,6 +560,50 @@ class ProbeFhPortCandidatesTests(unittest.TestCase):
         self.assertEqual(report["80"]["surface"]["/fh_tool/api"]["status_code"], 404)
         self.assertIsNone(report["80"]["getdevinfo"])
 
+    def test_reports_root_and_safe_headers_per_port(self) -> None:
+        def fake_get(url: str, **kwargs) -> _FakeResponse:
+            if url.endswith("/"):
+                return _FakeResponse(
+                    200,
+                    headers={
+                        "Server": "nginx",
+                        "Content-Type": "text/html",
+                        "Location": "/login",
+                        "Set-Cookie": "sid=secret",
+                    },
+                )
+            return _FakeResponse(400, headers={"Server": "nginx", "Content-Type": "text/plain"})
+
+        with (
+            patch("fh_tool_cli.backends.fh_tool.tcp_open", side_effect=[False, True]),
+            patch("fh_tool_cli.backends.fh_tool.requests.get", side_effect=fake_get),
+        ):
+            report = probe_fh_port_candidates(TEST_IP, None, 1.0, diagnose=True)
+        self.assertEqual(report["80"]["root"]["server"], "nginx")
+        self.assertEqual(report["80"]["root"]["content_type"], "text/html")
+        self.assertEqual(report["80"]["root"]["location"], "/login")
+        self.assertIn("set-cookie", report["80"]["root"]["header_names"])
+        self.assertEqual(report["80"]["surface"]["/fh_tool/api"]["server"], "nginx")
+        # 安全头子集不应把会话 cookie 写进 probe 输出。
+        self.assertNotIn("Set-Cookie", report["80"]["root"])
+
+    def test_default_report_keeps_legacy_shape(self) -> None:
+        with (
+            patch("fh_tool_cli.backends.fh_tool.tcp_open", side_effect=[False, True]),
+            patch(
+                "fh_tool_cli.backends.fh_tool.requests.get",
+                return_value=_FakeResponse(
+                    404, headers={"Content-Type": "text/html", "Server": "nginx"}
+                ),
+            ),
+        ):
+            report = probe_fh_port_candidates(TEST_IP, None, 1.0)
+        self.assertNotIn("root", report["80"])
+        self.assertEqual(
+            report["80"]["surface"]["/fh_tool/api"],
+            {"status_code": 404, "content_type": "text/html"},
+        )
+
     def test_getdevinfo_verified_with_mac(self) -> None:
         with (
             patch("fh_tool_cli.backends.fh_tool.tcp_open", side_effect=[False, True]),
@@ -472,6 +644,56 @@ class CliEndToEndTests(unittest.TestCase):
         self.assertEqual(payload["fh_port"], 80)
         self.assertEqual(payload["fh_port_source"], "argument")
         self.assertTrue(post_mock.call_args.args[0].startswith("http://192.168.1.1:80/"))
+
+    def _run_probe(self, *extra: str) -> dict:
+        stdout = io.StringIO()
+        with (
+            patch("fh_tool_cli.cli.resolve_mac", return_value=(None, "missing")),
+            patch("fh_tool_cli.backends.fh_tool.tcp_open", return_value=False),
+            patch(
+                "fh_tool_cli.backends.fh_tool.requests.get",
+                return_value=_FakeResponse(
+                    404, headers={"Content-Type": "text/html", "Server": "nginx"}
+                ),
+            ),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            exit_code = cli.main(
+                [
+                    "probe",
+                    "--ip",
+                    TEST_IP,
+                    "--fh-port",
+                    "80",
+                    "--timeout",
+                    "1",
+                    "--json",
+                    *extra,
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        return json.loads(stdout.getvalue())
+
+    def test_probe_default_json_has_no_diagnostic_fields(self) -> None:
+        payload = self._run_probe()
+        self.assertNotIn("root", payload)
+        self.assertEqual(
+            payload["surface"]["/fh_tool/api"],
+            {"status_code": 404, "content_type": "text/html"},
+        )
+        self.assertNotIn("root", payload["fh_ports"]["80"])
+        self.assertEqual(
+            payload["fh_ports"]["80"]["surface"]["/fh_tool/api"],
+            {"status_code": 404, "content_type": "text/html"},
+        )
+
+    def test_probe_diagnose_json_adds_root_and_headers(self) -> None:
+        payload = self._run_probe("--diagnose")
+        self.assertEqual(payload["root"]["server"], "nginx")
+        self.assertIn("server", payload["surface"]["/fh_tool/api"])
+        self.assertEqual(payload["fh_ports"]["80"]["root"]["server"], "nginx")
+        self.assertIn("header_names", payload["fh_ports"]["80"]["surface"]["/fh_tool/api"])
 
 
 if __name__ == "__main__":

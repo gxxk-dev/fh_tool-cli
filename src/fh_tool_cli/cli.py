@@ -21,12 +21,13 @@ from .account import (
     set_web_admin_password,
 )
 from .argparse_utils import parse_json_object, parse_kv, parse_ports
+from .scan import scan_fh_tool_endpoints
 from .backends.fh_tool import (
     api_payload,
     call_method,
     fh_paths_from_args,
     fh_tool_call,
-    fh_tool_url,
+    http_get_surface,
     probe_fh_port_candidates,
     resolve_fh_port,
     response_download_url,
@@ -192,6 +193,7 @@ def command_probe(args: argparse.Namespace) -> dict[str, Any]:
     ports = parse_ports(args.ports)
     fh_paths = fh_paths_from_args(args)
     fh_port, fh_port_source = resolve_fh_port(args, ip, mac=mac, timeout=args.timeout, path=fh_paths.api)
+    diagnose = bool(getattr(args, "diagnose", False))
 
     result: dict[str, Any] = {
         "mode": "probe",
@@ -207,19 +209,14 @@ def command_probe(args: argparse.Namespace) -> dict[str, Any]:
         "tcp": {str(port): tcp_open(ip, port, args.timeout) for port in ports},
         "surface": {},
         "fh_tool_probe": None,
-        "fh_ports": probe_fh_port_candidates(ip, mac, args.timeout, paths=fh_paths),
+        "fh_ports": probe_fh_port_candidates(ip, mac, args.timeout, paths=fh_paths, diagnose=diagnose),
     }
+    if diagnose:
+        # 默认 probe 输出保持精简；显式 --diagnose 才额外 GET / 做服务指纹。
+        result["root"] = http_get_surface(ip, fh_port, "/", args.timeout, diagnose=True)
 
     for path in [fh_paths.api, fh_paths.upload, fh_paths.download]:
-        url = fh_tool_url(ip, fh_port, path)
-        try:
-            response = requests.get(url, timeout=args.timeout, allow_redirects=False)
-            result["surface"][path] = {
-                "status_code": response.status_code,
-                "content_type": response.headers.get("Content-Type"),
-            }
-        except requests.RequestException as exc:
-            result["surface"][path] = {"error": str(exc)}
+        result["surface"][path] = http_get_surface(ip, fh_port, path, args.timeout, diagnose=diagnose)
 
     if mac:
         try:
@@ -230,6 +227,7 @@ def command_probe(args: argparse.Namespace) -> dict[str, Any]:
                 args.timeout,
                 port=fh_port,
                 path=fh_paths.api,
+                diagnose=diagnose,
             )
             result["fh_tool_probe"] = {
                 "func": "GetDevInfo",
@@ -343,6 +341,36 @@ def command_ports(args: argparse.Namespace) -> dict[str, Any]:
         "ip_source": ip_source,
         "tcp": {str(port): tcp_open(ip, port, args.timeout) for port in ports},
     }
+
+
+def command_scan(args: argparse.Namespace) -> dict[str, Any]:
+    ip, ip_source = resolve_ip(args)
+    allow_prompt = bool(getattr(args, "ask_mac", False)) and not bool(getattr(args, "json", False))
+    mac, mac_source = resolve_mac(args, ip, required=False, allow_prompt=allow_prompt)
+    result = scan_fh_tool_endpoints(
+        ip,
+        mac,
+        args.timeout,
+        ports=args.ports,
+        paths=args.paths,
+        connect_timeout=args.connect_timeout,
+        workers=args.workers,
+    )
+    result.update(
+        {
+            "ip_source": ip_source,
+            "mac": format_mac(mac) if mac else None,
+            "mac_source": mac_source,
+        }
+    )
+    if not mac:
+        result["hint"] = "缺少 MAC，只能检查端口/路径表面状态；加 --mac 才能用 GetDevInfo 验证。"
+    elif not result["verified"]:
+        result["hint"] = (
+            "未找到通过 GetDevInfo 验证的端点；可扩大 --ports/--paths，"
+            "或用 fh-tool probe --diagnose 查看端口指纹。"
+        )
+    return result
 
 
 def command_config_show(args: argparse.Namespace) -> dict[str, Any]:
@@ -1176,6 +1204,7 @@ def command_upload(args: argparse.Namespace) -> dict[str, Any]:
 def _command_handlers() -> dict[str, Any]:
     return {
         "command_probe": command_probe,
+        "command_scan": command_scan,
         "command_adapt_prompt": command_adapt_prompt,
         "command_ports": command_ports,
         "command_config_decrypt": command_config_decrypt,
